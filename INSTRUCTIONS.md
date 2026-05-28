@@ -64,6 +64,20 @@ findmnt /mnt/target_drive
 df -h /mnt/target_drive
 ```
 
+## Optional desktop app
+
+The Flutter desktop app can run the same guarded workflow with path settings,
+step status, and live log output:
+
+```bash
+flutter pub get
+flutter run -d linux
+```
+
+ChromeOS support means running the Linux target inside the ChromeOS Linux
+development environment. macOS and Windows builds can launch the app, but
+Linux-only dependency installation and Immich setup steps remain guarded.
+
 Open in Ubuntu Files:
 
 ```bash

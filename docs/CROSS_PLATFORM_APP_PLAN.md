@@ -20,12 +20,12 @@ Branch: `feature-cross-platform-desktop-app`
 | --- | --- | --- | --- | --- |
 | 1. Create branch and planning artifacts | Complete | `75073c7` | Plan document and memory file created. | Branch created as `feature-cross-platform-desktop-app` because slash refs were blocked by local `.git` sandboxing. |
 | 2. Scaffold Flutter desktop app | Complete | `b439119` | Flutter scaffold generated and smoke test updated. | App shell preserves existing scripts and docs. |
-| 3. Add pipeline runner and step model | In progress | Pending | `flutter analyze`; `flutter test` | Stream logs, pass env vars, capture exit codes. |
-| 4. Build core UI | In progress | Pending | `flutter analyze`; `flutter test` | Operational workflow, path settings, logs, guarded actions. |
-| 5. Add platform and dependency checks | In progress | Pending | `flutter analyze`; `flutter test` | Linux/ChromeOS full support; macOS/Windows guarded support. |
-| 6. Integrate safety-critical workflows | In progress | Pending | `flutter analyze`; `flutter test` | Dry-run review before confirm cleanup or restore. |
-| 7. Add tests and CI | In progress | Pending | `flutter analyze`; `flutter test` | Flutter model/widget tests added; CI pending. |
-| 8. Update user documentation | Pending | Pending | Pending | README, instructions, and app usage docs. |
+| 3. Add pipeline runner and step model | Complete | `9b3a932` | `flutter analyze`; `flutter test` | Stream logs, pass env vars, capture exit codes. |
+| 4. Build core UI | Complete | `9b3a932` | `flutter analyze`; `flutter test` | Operational workflow, path settings, logs, guarded actions. |
+| 5. Add platform and dependency checks | Complete | `9b3a932` | `flutter analyze`; `flutter test` | Linux/ChromeOS full support; macOS/Windows guarded support. |
+| 6. Integrate safety-critical workflows | Complete | `9b3a932` | `flutter analyze`; `flutter test` | Dry-run review before confirm cleanup or restore. |
+| 7. Add tests and CI | In progress | Pending | `flutter analyze`; `flutter test`; CI workflow updated. | Flutter model/widget tests added; CI pending commit. |
+| 8. Update user documentation | In progress | Pending | Documentation updated. | README, instructions, and app usage docs. |
 | 9. Final verification and push | Pending | Pending | Pending | Push structured commits to origin. |
 
 ## Public Interfaces
@@ -45,4 +45,5 @@ Branch: `feature-cross-platform-desktop-app`
 - 2026-05-28: Started implementation on `feature-cross-platform-desktop-app`.
 - 2026-05-28: Completed planning artifact setup; commit `75073c7`.
 - 2026-05-28: Completed Flutter desktop scaffold; commit `b439119`.
-- 2026-05-28: Added typed pipeline model, process runner, guarded desktop UI, and Flutter tests. Verification: `flutter analyze` passed; `flutter test` passed.
+- 2026-05-28: Added typed pipeline model, process runner, guarded desktop UI, and Flutter tests; commit `9b3a932`. Verification: `flutter analyze` passed; `flutter test` passed.
+- 2026-05-28: Added Flutter CI job and desktop app documentation.

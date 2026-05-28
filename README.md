@@ -63,6 +63,23 @@ cd media-pipeline
 ./scripts/01_setup_dependencies.sh
 ```
 
+## Desktop app preview
+
+This repository now includes a Flutter desktop controller for Linux, macOS,
+Windows, and ChromeOS through the ChromeOS Linux environment. The app wraps the
+existing scripts and keeps the same safety model: dry-runs first, explicit
+confirm actions, and no permanent deletion.
+
+Run the app during development:
+
+```bash
+flutter pub get
+flutter run -d linux
+```
+
+See [`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md) for platform support and app
+workflow details.
+
 Place Google Photos Takeout archives into:
 
 ```text

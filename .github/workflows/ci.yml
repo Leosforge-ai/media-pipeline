@@ -53,6 +53,35 @@ jobs:
       - name: Run Ruff
         run: ruff check scripts config
 
+  flutter:
+    name: Flutter desktop app
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libgtk-3-dev ninja-build pkg-config
+
+      - name: Resolve Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze Flutter app
+        run: flutter analyze
+
+      - name: Test Flutter app
+        run: flutter test
+
+      - name: Build Linux desktop app
+        run: flutter build linux --debug
+
   yaml-and-compose:
     name: YAML and Docker Compose validation
     runs-on: ubuntu-latest
