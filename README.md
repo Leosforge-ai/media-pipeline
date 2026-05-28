@@ -1,158 +1,222 @@
-# Self-Hosted Media Optimization Pipeline
-An automated pipeline to download, repair metadata, deduplicate, and ingest Google Drive and Google Photos media into a self-hosted Immich instance.
+# Google Photos + Google Drive Media Cleanup Pipeline with Immich
 
-## Overview
-The scripts expect a media workspace on an external drive. By default they use the mounted drive name `target_drive`, which resolves to `/mnt/target_drive`.
+A defensive, resumable media workflow for people who want to consolidate Google Photos Takeout exports and Google Drive media, repair Google Photos JSON metadata, detect duplicates, safely move duplicates aside, and browse the final library in Immich.
 
-Drive configuration is centralized in [pipeline_config.sh](/home/leo/projects/media-pipeline/pipeline_config.sh:1):
+This project was built from real-world failure cases: `.tgz` Takeout archives, broken MP4 files, duplicated Google Photos folders such as `2024/` and `Fotos de 2024/`, Czkawka CLI flag changes, missing FFmpeg, unsafe duplicate-report parsing, and Immich external-library path mistakes.
 
-```bash
-DRIVE_NAME="${DRIVE_NAME:-target_drive}"
-MOUNT_ROOT="${MOUNT_ROOT:-/mnt}"
-HD_PATH="${HD_PATH:-$MOUNT_ROOT/$DRIVE_NAME}"
+> **Safety principle:** scripts default to dry-run or non-destructive behavior. Duplicate removal moves files into `media_trash`; it does not permanently delete files.
+
+---
+
+## What this pipeline does
+
+1. Creates a predictable external-drive folder structure.
+2. Imports media from Google Photos Takeout archives: `.zip`, `.tgz`, `.tar.gz`.
+3. Applies Google Photos JSON sidecar metadata to media files with `exiftool`.
+4. Imports selected Google Drive folders using `rclone`.
+5. Merges everything into `cleaning_staging`.
+6. Scans for:
+   - similar images,
+   - similar videos,
+   - exact duplicate files,
+   - optional blurry JPG/JPEG/PNG images.
+7. Produces human-readable reports.
+8. Runs a safe dry-run duplicate move plan.
+9. Moves duplicates into `media_trash` only after explicit confirmation.
+10. Copies the cleaned library into `immich_library`.
+11. Installs and configures Immich with:
+   - Immich upload storage at `/data`,
+   - cleaned read-only external library at `/library`.
+
+---
+
+## Folder layout on the external drive
+
+Default root:
+
+```text
+/mnt/target_drive
 ```
 
-Typical ways to switch targets:
+Created folders:
 
-```bash
-./setup.sh
-DRIVE_NAME=archive_4tb ./setup.sh
-HD_PATH=/media/leo/archive_4tb ./setup.sh
+```text
+/mnt/target_drive/
+├── raw_gdrive/           # rclone-imported Google Drive media
+├── raw_takeout_zips/     # Google Photos Takeout archives: .zip/.tgz/.tar.gz
+├── takeout_extracted/    # temporary extraction workspace
+├── cleaning_staging/     # cleaned/staged media before Immich
+├── media_trash/          # duplicates moved here, never permanently deleted
+├── immich_library/       # final library copied from cleaning_staging
+└── immich_app/           # Immich docker-compose, database, uploads
 ```
 
-## Directory Layout
-After setup, the drive contains:
+---
 
-- `raw_gdrive`: files copied from Google Drive that should be merged into the staging area
-- `raw_takeout_zips`: Google Takeout ZIP archives
-- `takeout_extracted`: temporary extraction area for Takeout archives
-- `cleaning_staging`: repaired and merged media, ready for duplicate and blur scanning
-- `media_trash`: files selected for removal
-- `immich_library`: Immich upload library path
-- `immich_app`: Immich `docker-compose.yml` and `.env`
-
-## Prerequisites
-- A mounted writable drive at `/mnt/target_drive`, or another path passed via `HD_PATH`
-- Ubuntu or another Debian-based Linux system with `sudo`
-- Internet access for dependency and Immich downloads during setup
-
-`cleanup.sh` also requires ImageMagick's `convert` command. If it is missing, install it manually:
+## Quick start
 
 ```bash
-sudo apt-get install -y imagemagick
+git clone <your-repo-url> media-pipeline
+cd media-pipeline
+
+./scripts/00_check_system.sh
+./scripts/01_setup_dependencies.sh
 ```
 
-## Script Usage
+Place Google Photos Takeout archives into:
 
-### 1. Initial setup
-Run the bootstrap script once:
+```text
+/mnt/target_drive/raw_takeout_zips
+```
+
+Configure Google Drive access if needed:
 
 ```bash
-./setup.sh
+./scripts/02_configure_rclone.sh
+./scripts/03_import_gdrive.sh "Fotos" "Wedding "
 ```
 
-To use another drive mounted under `/mnt`, change only the drive name:
+Process Takeout + merge Google Drive:
 
 ```bash
-DRIVE_NAME=my_other_drive ./setup.sh
+./scripts/04_stitch_metadata.py
 ```
 
-What it does:
-- installs system packages, Python packages, Docker, and `czkawka_cli`
-- creates the directory structure on the target drive
-- downloads Immich's `docker-compose.yml` and example `.env` into `immich_app`
-- rewrites the Immich upload path to use `immich_library`
-
-After setup, refresh your shell group membership before using Docker:
+Scan for duplicates:
 
 ```bash
-newgrp docker
+./scripts/05_cleanup_scan.sh
 ```
 
-### 2. Add source media
-Copy your inputs into the drive:
-
-- Put Google Takeout ZIPs into `raw_takeout_zips`
-- Put already-filtered Google Drive media into `raw_gdrive`
-
-Example:
+Dry-run duplicate removal:
 
 ```bash
-cp ~/Downloads/*.zip /mnt/target_drive/raw_takeout_zips/
-rsync -a ~/google-drive-export/ /mnt/target_drive/raw_gdrive/
+./scripts/06_delete_duplicates.sh | tee /tmp/delete_dry_run_v2.txt
 ```
 
-### 3. Repair metadata and build the staging set
-Run:
+Inspect first. Then, and only then, optionally move duplicates into `media_trash`:
 
 ```bash
-python3 stitch_metadata.py
+./scripts/06_delete_duplicates.sh --confirm | tee "$HOME/czkawka_reports/delete_confirm.txt"
 ```
 
-What it does:
-- extracts every ZIP from `raw_takeout_zips` into `takeout_extracted`
-- reads Google Photos JSON sidecars
-- writes timestamps and GPS metadata into matching media with `exiftool`
-- moves processed files into `cleaning_staging`
-- merges `raw_gdrive` into `cleaning_staging` with `rsync`
-
-### 4. Generate duplicate and blur reports
-Run:
+Copy cleaned files into Immich library:
 
 ```bash
-./cleanup.sh
+./scripts/08_sync_to_immich_library.sh
 ```
 
-Reports are written to:
+Install/start Immich:
 
 ```bash
-$HOME/czkawka_reports
+./scripts/09_setup_immich.sh
 ```
 
-Expected files:
-- `duplicate_images.txt`
-- `duplicate_videos.txt`
-- `blurry_images.txt`
+Open:
 
-### 5. Review and trash flagged files
-Start with the default dry run:
+```text
+http://localhost:2283
+```
+
+Then add an Immich External Library with path:
+
+```text
+/library
+```
+
+---
+
+## Final verification command
+
+Run this after cleanup and Immich setup:
 
 ```bash
-./delete.sh
+./scripts/07_verify_cleanup.sh
+./scripts/10_verify_immich.sh
 ```
 
-That prints which files would be moved into `media_trash` without changing anything.
+Expected signs of success:
 
-To actually move flagged files:
+- `cleaning_staging` contains the cleaned media.
+- `media_trash` contains moved duplicates.
+- `immich_library` file count matches `cleaning_staging` after sync.
+- Immich container sees `/library`.
+- Immich UI shows assets after external-library scan and background jobs finish.
+
+---
+
+## Important deletion disclaimer
+
+The duplicate deletion script is deliberately conservative but not magic. Czkawka similar-image detection can group files that are visually similar rather than byte-identical. Always inspect the dry-run output before using `--confirm`.
+
+Recommended dry-run review:
 
 ```bash
-./delete.sh --confirm
+grep -c '^Keep:' /tmp/delete_dry_run_v2.txt
+grep -c '^Would trash:' /tmp/delete_dry_run_v2.txt
+
+grep -E 'Would trash: Results|Would trash: Found|Would trash: [0-9]+ .*similar friends|Would trash: .* - [0-9]+x' /tmp/delete_dry_run_v2.txt | head
+
+grep -iE '\.(mp4|mov)$' /tmp/delete_dry_run_v2.txt | head -n 80
 ```
 
-### 6. Start Immich
-The setup script downloads Immich configuration into `immich_app`. Start it with Docker Compose:
+The third command should print nothing. If it prints report headers or Czkawka metadata, do not confirm.
+
+---
+
+## Immich design
+
+Immich is configured with two separate mounts:
+
+```text
+/data      Immich's own upload/storage folder
+/library   read-only cleaned media library
+```
+
+Do not add `/data` as an external library. Immich rejects the media upload folder as an external-library path. Add `/library` instead.
+
+---
+
+## Recovery
+
+Duplicate removal moves files to:
+
+```text
+/mnt/target_drive/media_trash
+```
+
+To restore from trash, dry-run first:
 
 ```bash
-cd /mnt/target_drive/immich_app
-docker compose up -d
+./scripts/11_restore_from_trash.sh | tee /tmp/restore_dry_run.txt
 ```
 
-At that point, point Immich at the configured library path on the same drive.
-
-## Typical End-to-End Flow
+Only if correct:
 
 ```bash
-./setup.sh
-python3 stitch_metadata.py
-./cleanup.sh
-./delete.sh
-./delete.sh --confirm
-cd /mnt/target_drive/immich_app
-docker compose up -d
+./scripts/11_restore_from_trash.sh --confirm
 ```
 
-## Notes
-- Change `DRIVE_NAME` when you want the scripts to use `/mnt/<drive-name>`.
-- Set `HD_PATH` directly when the mount is outside `/mnt`.
-- `delete.sh` moves files into `media_trash`; it does not permanently delete them.
-- `stitch_metadata.py` reprocesses files found in `takeout_extracted`, so keeping that directory tidy matters if you rerun the pipeline.
+---
+
+## Requirements
+
+Ubuntu or Debian-like Linux is recommended. The dependency script installs:
+
+- Python 3
+- rsync
+- exiftool
+- ffmpeg / ffprobe
+- ImageMagick
+- rclone
+- Docker + Docker Compose plugin
+- Czkawka CLI
+
+---
+
+## Limitations
+
+- Metadata stitching depends on available Google Photos JSON sidecars.
+- Some corrupted videos may not accept metadata writes; these are logged and still moved into staging.
+- Similar-image and similar-video detection can have false positives. Review dry-runs.
+- Read-only Immich external libraries cannot be modified by Immich. If you trash items in Immich, the original files may reappear after rescan because the read-only mount prevents Immich from deleting originals.
