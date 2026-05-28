@@ -26,7 +26,7 @@ jobs:
           sha256sum "media-pipeline-${VERSION}.zip" > "media-pipeline-${VERSION}.zip.sha256"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: media-pipeline-release-package
           path: |
