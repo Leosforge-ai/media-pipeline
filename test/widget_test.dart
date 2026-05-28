@@ -5,6 +5,7 @@ void main() {
   testWidgets('renders the desktop shell', (WidgetTester tester) async {
     await tester.pumpWidget(const MediaPipelineApp());
 
-    expect(find.text('Media Pipeline desktop shell'), findsOneWidget);
+    expect(find.text('Media Pipeline'), findsOneWidget);
+    expect(find.text('System Check'), findsWidgets);
   });
 }
