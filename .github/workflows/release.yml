@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -26,7 +26,7 @@ jobs:
           sha256sum "media-pipeline-${VERSION}.zip" > "media-pipeline-${VERSION}.zip.sha256"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: media-pipeline-release-package
           path: |
@@ -35,7 +35,7 @@ jobs:
 
       - name: Publish GitHub release for tags
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             media-pipeline-*.zip
