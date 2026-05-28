@@ -41,6 +41,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   late final TextEditingController _reportDirController;
   late PipelineSettings _settings;
   int _selectedIndex = 0;
+  bool _showHelp = false;
   String? _runningStepId;
 
   PipelineStep get _selectedStep => _steps[_selectedIndex];
@@ -124,43 +125,234 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const _AppHeader(),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                      child: SegmentedButton<bool>(
+                        segments: const [
+                          ButtonSegment(
+                            value: false,
+                            icon: Icon(Icons.playlist_play),
+                            label: Text('Workflow'),
+                          ),
+                          ButtonSegment(
+                            value: true,
+                            icon: Icon(Icons.help_outline),
+                            label: Text('Help'),
+                          ),
+                        ],
+                        selected: {_showHelp},
+                        onSelectionChanged: _runningStepId == null
+                            ? (selection) {
+                                setState(() => _showHelp = selection.first);
+                              }
+                            : null,
+                      ),
+                    ),
                     _SettingsPanel(
                       hdPathController: _hdPathController,
                       reportDirController: _reportDirController,
-                      enabled: _runningStepId == null,
+                      enabled: _runningStepId == null && !_showHelp,
                     ),
                     Expanded(
-                      child: ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-                        itemCount: _steps.length,
-                        itemBuilder: (context, index) {
-                          final step = _steps[index];
-                          return _StepTile(
-                            step: step,
-                            state: _states[step.id] ?? const StepRunState(),
-                            selected: index == _selectedIndex,
-                            onTap: () => setState(() => _selectedIndex = index),
-                          );
-                        },
-                      ),
+                      child: _showHelp
+                          ? const _HelpNav()
+                          : ListView.builder(
+                              padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+                              itemCount: _steps.length,
+                              itemBuilder: (context, index) {
+                                final step = _steps[index];
+                                return _StepTile(
+                                  step: step,
+                                  state:
+                                      _states[step.id] ?? const StepRunState(),
+                                  selected: index == _selectedIndex,
+                                  onTap: () =>
+                                      setState(() => _selectedIndex = index),
+                                );
+                              },
+                            ),
                     ),
                   ],
                 ),
               ),
             ),
             Expanded(
-              child: _StepDetail(
-                step: _selectedStep,
-                state: _states[_selectedStep.id] ?? const StepRunState(),
-                canRun:
-                    _runningStepId == null &&
-                    canRunStep(step: _selectedStep, states: _states),
-                running: _runningStepId == _selectedStep.id,
-                onRun: _runSelectedStep,
-              ),
+              child: _showHelp
+                  ? const _HelpDetail()
+                  : _StepDetail(
+                      step: _selectedStep,
+                      state: _states[_selectedStep.id] ?? const StepRunState(),
+                      canRun:
+                          _runningStepId == null &&
+                          canRunStep(step: _selectedStep, states: _states),
+                      running: _runningStepId == _selectedStep.id,
+                      onRun: _runSelectedStep,
+                    ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _HelpNav extends StatelessWidget {
+  const _HelpNav();
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = const [
+      (Icons.dns, 'Private Docker server'),
+      (Icons.phone_android, 'Phone backup'),
+      (Icons.photo_library, 'External libraries'),
+      (Icons.auto_awesome, 'Memories'),
+      (Icons.notifications_active, 'Notifications'),
+      (Icons.backup, 'Backup safety'),
+    ];
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+      itemCount: entries.length,
+      itemBuilder: (context, index) {
+        final entry = entries[index];
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: ListTile(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(6),
+            ),
+            leading: Icon(entry.$1, size: 20),
+            title: Text(entry.$2),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _HelpDetail extends StatelessWidget {
+  const _HelpDetail();
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: ListView(
+        children: [
+          Text('Immich Help', style: textTheme.headlineSmall),
+          const SizedBox(height: 8),
+          const Text(
+            'Use this checklist when connecting phones, scanning the cleaned library, and planning private memories.',
+          ),
+          const SizedBox(height: 20),
+          const _HelpSection(
+            icon: Icons.dns,
+            title: 'Private Docker Server',
+            bullets: [
+              'Use a private URL your phone can reach, such as http://SERVER_IP:2283.',
+              'LAN or VPN access is the default assumption; public exposure is not required.',
+              'Create API keys only for future app integrations and never commit them.',
+            ],
+          ),
+          const _HelpSection(
+            icon: Icons.phone_android,
+            title: 'Phone Backup',
+            bullets: [
+              'Install the Immich mobile app and log in to your private server.',
+              'Open the cloud backup screen, select albums, then enable backup.',
+              'Optionally enable album synchronization to mirror phone albums on the server.',
+              'Keep the app open for the first large upload and review server job queues.',
+            ],
+          ),
+          const _HelpSection(
+            icon: Icons.settings_cell,
+            title: 'Mobile Background Rules',
+            bullets: [
+              'Android may require disabling battery optimization for Immich.',
+              'iPhone requires Background App Refresh; iOS still decides when background tasks run.',
+              'Wi-Fi-only backup is the safer default unless mobile data usage is acceptable.',
+            ],
+          ),
+          const _HelpSection(
+            icon: Icons.photo_library,
+            title: 'External Library',
+            bullets: [
+              'Mount the cleaned project library into Immich as /library, read-only.',
+              'Do not use /data as an external library path; it is Immich upload storage.',
+              'Rescan the external library after files change outside Immich.',
+            ],
+          ),
+          const _HelpSection(
+            icon: Icons.auto_awesome,
+            title: 'Memories Direction',
+            bullets: [
+              'Future app work should connect to the private Immich API.',
+              'Start with explainable memory scoring before training a personal model.',
+              'Preview memory candidates before creating anything in Immich.',
+            ],
+          ),
+          const _HelpSection(
+            icon: Icons.notifications_active,
+            title: 'Notifications',
+            bullets: [
+              'Use optional providers such as ntfy, Gotify, Pushover, Home Assistant, or desktop notifications.',
+              'Send notifications only after memory candidates are approved or created.',
+              'Use VPN or private-network delivery when possible.',
+            ],
+          ),
+          const _HelpSection(
+            icon: Icons.backup,
+            title: 'Backup Safety',
+            bullets: [
+              'Immich database backups do not include photos and videos.',
+              'Back up both the database and the original media files.',
+              'Do not manually edit Immich-managed asset folders.',
+            ],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Full help library: docs/IMMICH_HELP_LIBRARY.md\nMajor plan: docs/MEMORIES_AND_MOBILE_PLAN.md',
+            style: textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HelpSection extends StatelessWidget {
+  const _HelpSection({
+    required this.icon,
+    required this.title,
+    required this.bullets,
+  });
+
+  final IconData icon;
+  final String title;
+  final List<String> bullets;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 20),
+              const SizedBox(width: 8),
+              Text(title, style: textTheme.titleMedium),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final bullet in bullets)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4, left: 28),
+              child: Text('- $bullet'),
+            ),
+        ],
       ),
     );
   }

@@ -49,3 +49,4 @@ Branch: `feature-cross-platform-desktop-app`
 - 2026-05-28: Added Flutter CI job and desktop app documentation; commit `1854d6f`.
 - 2026-05-28: Final local verification: `flutter analyze` passed; `flutter test` passed; `python3 -m compileall scripts config` passed. Linux desktop build could not complete locally because `cmake` is not installed. `shellcheck`, `shfmt`, `ruff`, and `yamllint` are also not installed locally and remain covered by CI.
 - 2026-05-28: Final plan status updated; commit `4ab9af8`.
+- 2026-05-28: Added Immich mobile backup and memories expansion plan, source-backed help library, and in-app Immich Help section.
