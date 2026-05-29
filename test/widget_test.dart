@@ -1,4 +1,9 @@
+import 'dart:io';
+import 'dart:ui';
+
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_pipeline_app/src/immich_phone_checklist_store.dart';
 import 'package:media_pipeline_app/src/immich_connection.dart';
 import 'package:media_pipeline_app/src/media_pipeline_app.dart';
 
@@ -38,7 +43,32 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Server reachable; API key verified'), findsOneWidget);
-    expect(find.text('Version: 1.140.0'), findsOneWidget);
+    expect(find.text('Immich Server Statistics'), findsOneWidget);
+    expect(find.text('Server version: 1.140.0'), findsOneWidget);
+    expect(find.text('Photos: 12'), findsOneWidget);
+    expect(find.text('Videos: 3'), findsOneWidget);
+    expect(find.text('Storage usage: 1.0 KB'), findsOneWidget);
+  });
+
+  testWidgets('shows unavailable Immich statistics gracefully', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MediaPipelineApp(immichClient: _FakeImmichClient.missingStatistics()),
+    );
+
+    await tester.tap(find.text('Immich'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Check Connection'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Server reachable; API key verified'), findsOneWidget);
+    expect(find.text('Immich Server Statistics'), findsOneWidget);
+    expect(find.text('Server version: 1.140.0'), findsOneWidget);
+    expect(find.text('Photos: unavailable'), findsOneWidget);
+    expect(find.text('Videos: unavailable'), findsOneWidget);
+    expect(find.text('Storage usage: unavailable'), findsOneWidget);
   });
 
   testWidgets('shows Immich connection errors', (WidgetTester tester) async {
@@ -63,11 +93,45 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('shows the phone backup checklist controls', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MediaPipelineApp(
+        immichClient: _FakeImmichClient.success(),
+        checklistStore: _FakeChecklistStore(),
+      ),
+    );
+
+    await tester.tap(find.text('Immich'));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Phone Backup Checklist'), findsOneWidget);
+    expect(find.text('Add phone'), findsOneWidget);
+    expect(find.textContaining('Stored locally at:'), findsOneWidget);
+    expect(find.text('App installed'), findsOneWidget);
+    expect(find.text('Server login confirmed'), findsOneWidget);
+    expect(find.text('Albums selected'), findsOneWidget);
+    expect(find.text('Backup enabled'), findsOneWidget);
+    expect(find.text('First upload observed'), findsOneWidget);
+    expect(find.text('Background permissions reviewed'), findsOneWidget);
+  });
 }
 
 class _FakeImmichClient extends ImmichApiClient {
   _FakeImmichClient.success()
     : _mode = _FakeMode.success,
+      issue = null,
+      message = null;
+
+  _FakeImmichClient.missingStatistics()
+    : _mode = _FakeMode.missingStatistics,
       issue = null,
       message = null;
 
@@ -93,6 +157,14 @@ class _FakeImmichClient extends ImmichApiClient {
         usageBytes: 1024,
         message: 'Read-only Immich API check completed.',
       ),
+      _FakeMode.missingStatistics => const ImmichConnectionReport(
+        serverUrl: 'http://localhost:2283/api/',
+        pingOk: true,
+        authenticated: true,
+        version: '1.140.0',
+        message:
+            'Server info verified. Statistics were not available with this key.',
+      ),
       _FakeMode.failure => throw ImmichConnectionException(
         issue ?? ImmichConnectionIssue.unexpectedResponse,
         message ?? 'boom',
@@ -101,4 +173,19 @@ class _FakeImmichClient extends ImmichApiClient {
   }
 }
 
-enum _FakeMode { success, failure }
+enum _FakeMode { success, missingStatistics, failure }
+
+class _FakeChecklistStore extends ImmichChecklistStore {
+  _FakeChecklistStore() : super(baseDirectory: Directory('.'));
+
+  @override
+  String get filePath => '/tmp/media_pipeline/immich_phone_checklists.json';
+
+  @override
+  Future<List<ImmichPhoneBackupChecklist>> load() async {
+    return [ImmichPhoneBackupChecklist.empty(id: 'phone-1')];
+  }
+
+  @override
+  Future<void> save(List<ImmichPhoneBackupChecklist> checklists) async {}
+}

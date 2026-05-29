@@ -145,7 +145,10 @@ class ImmichApiClient {
         headers,
       );
       if (statistics.statusCode >= 200 && statistics.statusCode < 300) {
-        statisticsJson = _decodeObject(statistics.body, context: 'server/statistics');
+        statisticsJson = _decodeObject(
+          statistics.body,
+          context: 'server/statistics',
+        );
       } else if (statistics.statusCode == HttpStatus.unauthorized) {
         statisticsNote =
             'Server info is verified, but this API key is invalid for server.statistics.';
@@ -183,7 +186,7 @@ class ImmichApiClient {
           _intValue(statisticsJson['usageByUser']),
       message: statisticsJson.isEmpty
           ? statisticsNote ??
-              'Server info verified. Statistics were not available with this key.'
+                'Server info verified. Statistics were not available with this key.'
           : 'Read-only Immich API check completed.',
     );
   }
@@ -281,10 +284,7 @@ Uri _resolveApiBase(String serverUrl) {
   }
 }
 
-Map<String, Object?> _decodeObject(
-  String body, {
-  required String context,
-}) {
+Map<String, Object?> _decodeObject(String body, {required String context}) {
   final decoded = jsonDecode(body);
   if (decoded is Map<String, Object?>) {
     return decoded;

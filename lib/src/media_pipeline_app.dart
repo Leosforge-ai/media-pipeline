@@ -1,15 +1,18 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import 'immich_connection.dart';
+import 'immich_phone_checklist_store.dart';
 import 'pipeline_models.dart';
 import 'pipeline_runner.dart';
 
 class MediaPipelineApp extends StatelessWidget {
-  const MediaPipelineApp({super.key, this.immichClient});
+  const MediaPipelineApp({super.key, this.immichClient, this.checklistStore});
 
   final ImmichApiClient? immichClient;
+  final ImmichChecklistStore? checklistStore;
 
   @override
   Widget build(BuildContext context) {
@@ -24,15 +27,19 @@ class MediaPipelineApp extends StatelessWidget {
         useMaterial3: true,
         visualDensity: VisualDensity.compact,
       ),
-      home: PipelineHomePage(immichClient: immichClient),
+      home: PipelineHomePage(
+        immichClient: immichClient,
+        checklistStore: checklistStore,
+      ),
     );
   }
 }
 
 class PipelineHomePage extends StatefulWidget {
-  const PipelineHomePage({super.key, this.immichClient});
+  const PipelineHomePage({super.key, this.immichClient, this.checklistStore});
 
   final ImmichApiClient? immichClient;
+  final ImmichChecklistStore? checklistStore;
 
   @override
   State<PipelineHomePage> createState() => _PipelineHomePageState();
@@ -43,11 +50,14 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   final Map<String, StepRunState> _states = {};
   late final PipelineRunner _runner;
   late final ImmichApiClient _immichClient;
+  late final ImmichChecklistStore _checklistStore;
   late final TextEditingController _hdPathController;
   late final TextEditingController _immichApiKeyController;
   late final TextEditingController _immichUrlController;
   late final TextEditingController _reportDirController;
   late PipelineSettings _settings;
+  List<ImmichPhoneBackupChecklist> _phoneChecklists = [];
+  bool _loadingPhoneChecklists = true;
   int _selectedIndex = 0;
   _AppMode _mode = _AppMode.workflow;
   String? _runningStepId;
@@ -63,13 +73,18 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     _settings = PipelineSettings.defaults();
     _runner = PipelineRunner(workingDirectory: Directory.current.path);
     _immichClient = widget.immichClient ?? ImmichApiClient();
+    _checklistStore = widget.checklistStore ?? ImmichChecklistStore();
     _hdPathController = TextEditingController(text: _settings.hdPath);
     _immichUrlController = TextEditingController(text: 'http://localhost:2283');
     _immichApiKeyController = TextEditingController();
     _reportDirController = TextEditingController(text: _settings.reportDir);
+    _phoneChecklists = [
+      ImmichPhoneBackupChecklist.empty(id: _newChecklistId()),
+    ];
     for (final step in _steps) {
       _states[step.id] = const StepRunState();
     }
+    unawaited(_loadPhoneChecklists());
   }
 
   @override
@@ -79,6 +94,71 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     _immichUrlController.dispose();
     _reportDirController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadPhoneChecklists() async {
+    try {
+      final loaded = await _checklistStore.load();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _phoneChecklists = loaded.isEmpty
+            ? [ImmichPhoneBackupChecklist.empty(id: _newChecklistId())]
+            : loaded;
+        _loadingPhoneChecklists = false;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _loadingPhoneChecklists = false);
+    }
+  }
+
+  void _persistPhoneChecklists() {
+    unawaited(_checklistStore.save(_phoneChecklists));
+  }
+
+  void _upsertPhoneChecklist(ImmichPhoneBackupChecklist updated) {
+    setState(() {
+      final index = _phoneChecklists.indexWhere(
+        (item) => item.id == updated.id,
+      );
+      if (index == -1) {
+        _phoneChecklists = [..._phoneChecklists, updated];
+      } else {
+        final next = [..._phoneChecklists];
+        next[index] = updated;
+        _phoneChecklists = next;
+      }
+    });
+    _persistPhoneChecklists();
+  }
+
+  void _addPhoneChecklist() {
+    setState(() {
+      _phoneChecklists = [
+        ..._phoneChecklists,
+        ImmichPhoneBackupChecklist.empty(id: _newChecklistId()),
+      ];
+    });
+    _persistPhoneChecklists();
+  }
+
+  void _removePhoneChecklist(String id) {
+    setState(() {
+      _phoneChecklists = [
+        for (final item in _phoneChecklists)
+          if (item.id != id) item,
+      ];
+      if (_phoneChecklists.isEmpty) {
+        _phoneChecklists = [
+          ImmichPhoneBackupChecklist.empty(id: _newChecklistId()),
+        ];
+      }
+    });
+    _persistPhoneChecklists();
   }
 
   Future<void> _runSelectedStep() async {
@@ -260,6 +340,12 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   checking: _checkingImmich,
                   report: _immichReport,
                   failure: _immichFailure,
+                  phoneChecklists: _phoneChecklists,
+                  loadingPhoneChecklists: _loadingPhoneChecklists,
+                  checklistStoragePath: _checklistStore.filePath,
+                  onAddPhoneChecklist: _addPhoneChecklist,
+                  onRemovePhoneChecklist: _removePhoneChecklist,
+                  onUpdatePhoneChecklist: _upsertPhoneChecklist,
                   onCheck: _checkImmichConnection,
                 ),
                 _AppMode.help => const _HelpDetail(),
@@ -291,6 +377,11 @@ class _ImmichNav extends StatelessWidget {
           icon: Icons.key,
           title: 'Credentials',
           subtitle: 'Kept in memory only for this app session.',
+        ),
+        _NavHintTile(
+          icon: Icons.phone_android,
+          title: 'Phone backup checklist',
+          subtitle: 'Track each family phone locally.',
         ),
         _NavHintTile(
           icon: Icons.query_stats,
@@ -334,6 +425,12 @@ class _ImmichConnectionDetail extends StatelessWidget {
     required this.checking,
     required this.report,
     required this.failure,
+    required this.phoneChecklists,
+    required this.loadingPhoneChecklists,
+    required this.checklistStoragePath,
+    required this.onAddPhoneChecklist,
+    required this.onRemovePhoneChecklist,
+    required this.onUpdatePhoneChecklist,
     required this.onCheck,
   });
 
@@ -342,6 +439,13 @@ class _ImmichConnectionDetail extends StatelessWidget {
   final bool checking;
   final ImmichConnectionReport? report;
   final ImmichConnectionException? failure;
+  final List<ImmichPhoneBackupChecklist> phoneChecklists;
+  final bool loadingPhoneChecklists;
+  final String checklistStoragePath;
+  final VoidCallback onAddPhoneChecklist;
+  final void Function(String id) onRemovePhoneChecklist;
+  final void Function(ImmichPhoneBackupChecklist updated)
+  onUpdatePhoneChecklist;
   final VoidCallback onCheck;
 
   @override
@@ -407,21 +511,23 @@ class _ImmichConnectionDetail extends StatelessWidget {
               isError: true,
             )
           else if (report != null)
-            _StatusPanel(
-              icon: report!.authenticated ? Icons.check_circle : Icons.info,
-              title: report!.statusLabel,
-              lines: [
-                'API base: ${report!.serverUrl}',
-                if (report!.version != null) 'Version: ${report!.version}',
-                if (report!.licensed != null)
-                  'Licensed: ${report!.licensed! ? 'yes' : 'no'}',
-                if (report!.photos != null) 'Photos: ${report!.photos}',
-                if (report!.videos != null) 'Videos: ${report!.videos}',
-                if (report!.usageBytes != null)
-                  'Storage usage: ${_formatBytes(report!.usageBytes!)}',
-                if (report!.message != null) report!.message!,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _StatusPanel(
+                  icon: report!.authenticated ? Icons.check_circle : Icons.info,
+                  title: report!.statusLabel,
+                  lines: [
+                    'API base: ${report!.serverUrl}',
+                    if (report!.licensed != null)
+                      'Licensed: ${report!.licensed! ? 'yes' : 'no'}',
+                    if (report!.message != null) report!.message!,
+                  ],
+                  isError: !report!.pingOk,
+                ),
+                const SizedBox(height: 12),
+                _ImmichStatisticsPanel(report: report!),
               ],
-              isError: !report!.pingOk,
             )
           else
             const _StatusPanel(
@@ -432,8 +538,38 @@ class _ImmichConnectionDetail extends StatelessWidget {
                 'Use LAN or VPN access for a private Docker Immich server.',
               ],
             ),
+          const SizedBox(height: 24),
+          _PhoneBackupChecklistSection(
+            checklists: phoneChecklists,
+            loading: loadingPhoneChecklists,
+            storagePath: checklistStoragePath,
+            onAdd: onAddPhoneChecklist,
+            onRemove: onRemovePhoneChecklist,
+            onUpdate: onUpdatePhoneChecklist,
+          ),
         ],
       ),
+    );
+  }
+}
+
+class _ImmichStatisticsPanel extends StatelessWidget {
+  const _ImmichStatisticsPanel({required this.report});
+
+  final ImmichConnectionReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = [
+      'Server version: ${report.version ?? 'unavailable'}',
+      'Photos: ${_formatNullableCount(report.photos)}',
+      'Videos: ${_formatNullableCount(report.videos)}',
+      'Storage usage: ${report.usageBytes == null ? 'unavailable' : _formatBytes(report.usageBytes!)}',
+    ];
+    return _StatusPanel(
+      icon: Icons.query_stats,
+      title: 'Immich Server Statistics',
+      lines: lines,
     );
   }
 }
@@ -487,6 +623,225 @@ class _StatusPanel extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 4),
                 child: Text(line),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PhoneBackupChecklistSection extends StatelessWidget {
+  const _PhoneBackupChecklistSection({
+    required this.checklists,
+    required this.loading,
+    required this.storagePath,
+    required this.onAdd,
+    required this.onRemove,
+    required this.onUpdate,
+  });
+
+  final List<ImmichPhoneBackupChecklist> checklists;
+  final bool loading;
+  final String storagePath;
+  final VoidCallback onAdd;
+  final void Function(String id) onRemove;
+  final void Function(ImmichPhoneBackupChecklist updated) onUpdate;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              Icons.phone_android,
+              size: 20,
+              color: textTheme.bodyMedium?.color,
+            ),
+            const SizedBox(width: 8),
+            Text('Phone Backup Checklist', style: textTheme.titleMedium),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Track setup for each family phone. The checklist starts in memory, then saves to a local JSON file when you edit it.',
+        ),
+        const SizedBox(height: 8),
+        Text('Stored locally at: $storagePath', style: textTheme.bodySmall),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            onPressed: onAdd,
+            icon: const Icon(Icons.add),
+            label: const Text('Add phone'),
+          ),
+        ),
+        if (loading) ...[
+          const SizedBox(height: 12),
+          Text('Loading saved checklist...', style: textTheme.bodySmall),
+        ],
+        const SizedBox(height: 12),
+        for (final checklist in checklists)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: _PhoneBackupChecklistCard(
+              key: ValueKey(checklist.id),
+              checklist: checklist,
+              canRemove: checklists.length > 1,
+              onRemove: () => onRemove(checklist.id),
+              onChanged: onUpdate,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _PhoneBackupChecklistCard extends StatefulWidget {
+  const _PhoneBackupChecklistCard({
+    super.key,
+    required this.checklist,
+    required this.canRemove,
+    required this.onRemove,
+    required this.onChanged,
+  });
+
+  final ImmichPhoneBackupChecklist checklist;
+  final bool canRemove;
+  final VoidCallback onRemove;
+  final void Function(ImmichPhoneBackupChecklist updated) onChanged;
+
+  @override
+  State<_PhoneBackupChecklistCard> createState() =>
+      _PhoneBackupChecklistCardState();
+}
+
+class _PhoneBackupChecklistCardState extends State<_PhoneBackupChecklistCard> {
+  late final TextEditingController _phoneNameController;
+
+  @override
+  void initState() {
+    super.initState();
+    _phoneNameController = TextEditingController(
+      text: widget.checklist.phoneName,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _PhoneBackupChecklistCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.checklist.phoneName != widget.checklist.phoneName &&
+        _phoneNameController.text != widget.checklist.phoneName) {
+      _phoneNameController.text = widget.checklist.phoneName;
+    }
+  }
+
+  @override
+  void dispose() {
+    _phoneNameController.dispose();
+    super.dispose();
+  }
+
+  void _update({
+    String? phoneName,
+    bool? appInstalled,
+    bool? serverLoginConfirmed,
+    bool? albumsSelected,
+    bool? backupEnabled,
+    bool? firstUploadObserved,
+    bool? backgroundPermissionsReviewed,
+  }) {
+    widget.onChanged(
+      widget.checklist.copyWith(
+        phoneName: phoneName ?? widget.checklist.phoneName,
+        appInstalled: appInstalled ?? widget.checklist.appInstalled,
+        serverLoginConfirmed:
+            serverLoginConfirmed ?? widget.checklist.serverLoginConfirmed,
+        albumsSelected: albumsSelected ?? widget.checklist.albumsSelected,
+        backupEnabled: backupEnabled ?? widget.checklist.backupEnabled,
+        firstUploadObserved:
+            firstUploadObserved ?? widget.checklist.firstUploadObserved,
+        backgroundPermissionsReviewed:
+            backgroundPermissionsReviewed ??
+            widget.checklist.backgroundPermissionsReviewed,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _phoneNameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Phone name',
+                      hintText: 'e.g. Alex iPhone',
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (value) => _update(phoneName: value),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  tooltip: widget.canRemove
+                      ? 'Remove phone'
+                      : 'Keep at least one phone',
+                  onPressed: widget.canRemove ? widget.onRemove : null,
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            CheckboxListTile(
+              value: widget.checklist.appInstalled,
+              onChanged: (value) => _update(appInstalled: value ?? false),
+              title: const Text('App installed'),
+              contentPadding: EdgeInsets.zero,
+            ),
+            CheckboxListTile(
+              value: widget.checklist.serverLoginConfirmed,
+              onChanged: (value) =>
+                  _update(serverLoginConfirmed: value ?? false),
+              title: const Text('Server login confirmed'),
+              contentPadding: EdgeInsets.zero,
+            ),
+            CheckboxListTile(
+              value: widget.checklist.albumsSelected,
+              onChanged: (value) => _update(albumsSelected: value ?? false),
+              title: const Text('Albums selected'),
+              contentPadding: EdgeInsets.zero,
+            ),
+            CheckboxListTile(
+              value: widget.checklist.backupEnabled,
+              onChanged: (value) => _update(backupEnabled: value ?? false),
+              title: const Text('Backup enabled'),
+              contentPadding: EdgeInsets.zero,
+            ),
+            CheckboxListTile(
+              value: widget.checklist.firstUploadObserved,
+              onChanged: (value) =>
+                  _update(firstUploadObserved: value ?? false),
+              title: const Text('First upload observed'),
+              contentPadding: EdgeInsets.zero,
+            ),
+            CheckboxListTile(
+              value: widget.checklist.backgroundPermissionsReviewed,
+              onChanged: (value) =>
+                  _update(backgroundPermissionsReviewed: value ?? false),
+              title: const Text('Background permissions reviewed'),
+              contentPadding: EdgeInsets.zero,
+            ),
           ],
         ),
       ),
@@ -905,6 +1260,10 @@ String _commandLabel(PipelineStep step) {
   return ([step.command.executable, ...step.command.arguments]).join(' ');
 }
 
+String _newChecklistId() {
+  return DateTime.now().microsecondsSinceEpoch.toString();
+}
+
 String? _blockedReason(PipelineStep step, {required bool canRun}) {
   if (step.linuxOnly && !Platform.isLinux) {
     return 'This step is enabled only on Linux or ChromeOS Linux in v1.';
@@ -926,6 +1285,8 @@ String _formatBytes(int bytes) {
   final decimals = value >= 10 || unitIndex == 0 ? 0 : 1;
   return '${value.toStringAsFixed(decimals)} ${units[unitIndex]}';
 }
+
+String _formatNullableCount(int? value) => value?.toString() ?? 'unavailable';
 
 IconData _failureIcon(ImmichConnectionIssue issue) {
   return switch (issue) {

@@ -43,6 +43,7 @@ The app includes an **Immich Help** section for the parts users normally need wh
 - private Docker server URLs and LAN/VPN access;
 - phone backup setup;
 - Android and iPhone background-upload caveats;
+- phone backup checklist state stored locally as JSON;
 - external-library setup for `/library`;
 - future private memories and notification direction;
 - database and media backup safety.
@@ -58,6 +59,8 @@ The **Immich** section checks a private Immich server before future mobile backu
 3. Select **Check Connection**.
 
 The app runs `GET /api/server/ping` without credentials. If an API key is present, it also runs read-only authenticated server checks using the `x-api-key` header. The key is held only in memory for the running app session and is not written to project files.
+
+When authenticated checks succeed, the app shows a read-only **Immich Server Statistics** panel for server version, photo count, video count, and storage usage. Missing statistics are shown as unavailable instead of failing the connection check.
 
 Test the connection manually:
 
@@ -75,6 +78,14 @@ Common failure meanings:
 - `Server unreachable` usually means the URL is wrong, the container is down, or the app cannot reach your LAN/VPN network.
 - `API key rejected` usually means the key is invalid or missing `server.about` access.
 - `Missing permission` means the key can talk to Immich, but it does not have `server.statistics`; the app can still verify the server and read basic info.
+
+## Phone Backup Checklist Storage
+
+The app keeps the phone backup checklist in a local JSON file only. It does not store API keys in that file.
+
+- Linux: `~/.config/media_pipeline/immich_phone_checklists.json`
+- macOS: `~/Library/Application Support/media_pipeline/immich_phone_checklists.json`
+- Windows: `%APPDATA%\media_pipeline\immich_phone_checklists.json`
 
 ## Safety Notes
 
