@@ -34,7 +34,7 @@ The feature must assume a private personal Immich deployment by default. It shou
 - Show server health, authenticated user, and basic library statistics.
 - Keep private LAN/VPN use as the default documented path.
 
-Status: in progress. The desktop app now has an **Immich** section that keeps the server URL and API key in memory for the current app session, runs a public ping check, verifies authenticated read-only server information and statistics when the API key allows it, and includes a locally saved phone backup checklist. No credentials are written to repository files.
+Status: in progress. The desktop app now has an **Immich** section that keeps the server URL and API key in memory for the current app session, runs a public ping check, verifies authenticated read-only server information, shows a read-only server statistics panel when the API key allows it, and includes a locally saved phone backup checklist. No credentials are written to repository files.
 
 ## Phase 3: Mobile Backup Assistant
 

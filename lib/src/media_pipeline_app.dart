@@ -511,21 +511,23 @@ class _ImmichConnectionDetail extends StatelessWidget {
               isError: true,
             )
           else if (report != null)
-            _StatusPanel(
-              icon: report!.authenticated ? Icons.check_circle : Icons.info,
-              title: report!.statusLabel,
-              lines: [
-                'API base: ${report!.serverUrl}',
-                if (report!.version != null) 'Version: ${report!.version}',
-                if (report!.licensed != null)
-                  'Licensed: ${report!.licensed! ? 'yes' : 'no'}',
-                if (report!.photos != null) 'Photos: ${report!.photos}',
-                if (report!.videos != null) 'Videos: ${report!.videos}',
-                if (report!.usageBytes != null)
-                  'Storage usage: ${_formatBytes(report!.usageBytes!)}',
-                if (report!.message != null) report!.message!,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _StatusPanel(
+                  icon: report!.authenticated ? Icons.check_circle : Icons.info,
+                  title: report!.statusLabel,
+                  lines: [
+                    'API base: ${report!.serverUrl}',
+                    if (report!.licensed != null)
+                      'Licensed: ${report!.licensed! ? 'yes' : 'no'}',
+                    if (report!.message != null) report!.message!,
+                  ],
+                  isError: !report!.pingOk,
+                ),
+                const SizedBox(height: 12),
+                _ImmichStatisticsPanel(report: report!),
               ],
-              isError: !report!.pingOk,
             )
           else
             const _StatusPanel(
@@ -547,6 +549,27 @@ class _ImmichConnectionDetail extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ImmichStatisticsPanel extends StatelessWidget {
+  const _ImmichStatisticsPanel({required this.report});
+
+  final ImmichConnectionReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = [
+      'Server version: ${report.version ?? 'unavailable'}',
+      'Photos: ${_formatNullableCount(report.photos)}',
+      'Videos: ${_formatNullableCount(report.videos)}',
+      'Storage usage: ${report.usageBytes == null ? 'unavailable' : _formatBytes(report.usageBytes!)}',
+    ];
+    return _StatusPanel(
+      icon: Icons.query_stats,
+      title: 'Immich Server Statistics',
+      lines: lines,
     );
   }
 }
@@ -1262,6 +1285,8 @@ String _formatBytes(int bytes) {
   final decimals = value >= 10 || unitIndex == 0 ? 0 : 1;
   return '${value.toStringAsFixed(decimals)} ${units[unitIndex]}';
 }
+
+String _formatNullableCount(int? value) => value?.toString() ?? 'unavailable';
 
 IconData _failureIcon(ImmichConnectionIssue issue) {
   return switch (issue) {

@@ -60,6 +60,8 @@ The **Immich** section checks a private Immich server before future mobile backu
 
 The app runs `GET /api/server/ping` without credentials. If an API key is present, it also runs read-only authenticated server checks using the `x-api-key` header. The key is held only in memory for the running app session and is not written to project files.
 
+When authenticated checks succeed, the app shows a read-only **Immich Server Statistics** panel for server version, photo count, video count, and storage usage. Missing statistics are shown as unavailable instead of failing the connection check.
+
 Test the connection manually:
 
 ```bash

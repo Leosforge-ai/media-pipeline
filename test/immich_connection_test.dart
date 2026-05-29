@@ -130,7 +130,7 @@ void main() {
       },
     );
 
-    test('does not call authenticated endpoints without an API key', () async {
+    test('supports ping-only connection without an API key', () async {
       final calls = <Uri>[];
       final client = ImmichApiClient(
         get: (uri, headers) async {
@@ -152,6 +152,7 @@ void main() {
       expect(calls.map((uri) => uri.path), ['/api/server/ping']);
       expect(report.pingOk, isTrue);
       expect(report.authenticated, isFalse);
+      expect(report.message, contains('Add an Immich API key'));
     });
 
     test('rejects a bad API key with a specific error', () async {
@@ -259,5 +260,42 @@ void main() {
         expect(report.message, contains('lacks server.statistics permission'));
       },
     );
+
+    test('handles unavailable statistics without failing connection', () async {
+      final client = ImmichApiClient(
+        get: (uri, headers) async {
+          return switch (uri.path) {
+            '/api/server/ping' => const ImmichHttpResponse(
+              statusCode: 200,
+              body: '{"res":"pong"}',
+            ),
+            '/api/server/about' => ImmichHttpResponse(
+              statusCode: 200,
+              body: jsonEncode({'version': '1.140.0'}),
+            ),
+            '/api/server/statistics' => const ImmichHttpResponse(
+              statusCode: 503,
+              body: '{}',
+            ),
+            _ => const ImmichHttpResponse(statusCode: 404, body: '{}'),
+          };
+        },
+      );
+
+      final report = await client.check(
+        const ImmichConnectionSettings(
+          serverUrl: 'http://localhost:2283',
+          apiKey: 'secret',
+        ),
+      );
+
+      expect(report.pingOk, isTrue);
+      expect(report.authenticated, isTrue);
+      expect(report.version, '1.140.0');
+      expect(report.photos, isNull);
+      expect(report.videos, isNull);
+      expect(report.usageBytes, isNull);
+      expect(report.message, contains('statistics returned HTTP 503'));
+    });
   });
 }

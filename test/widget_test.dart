@@ -43,7 +43,32 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Server reachable; API key verified'), findsOneWidget);
-    expect(find.text('Version: 1.140.0'), findsOneWidget);
+    expect(find.text('Immich Server Statistics'), findsOneWidget);
+    expect(find.text('Server version: 1.140.0'), findsOneWidget);
+    expect(find.text('Photos: 12'), findsOneWidget);
+    expect(find.text('Videos: 3'), findsOneWidget);
+    expect(find.text('Storage usage: 1.0 KB'), findsOneWidget);
+  });
+
+  testWidgets('shows unavailable Immich statistics gracefully', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MediaPipelineApp(immichClient: _FakeImmichClient.missingStatistics()),
+    );
+
+    await tester.tap(find.text('Immich'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Check Connection'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Server reachable; API key verified'), findsOneWidget);
+    expect(find.text('Immich Server Statistics'), findsOneWidget);
+    expect(find.text('Server version: 1.140.0'), findsOneWidget);
+    expect(find.text('Photos: unavailable'), findsOneWidget);
+    expect(find.text('Videos: unavailable'), findsOneWidget);
+    expect(find.text('Storage usage: unavailable'), findsOneWidget);
   });
 
   testWidgets('shows Immich connection errors', (WidgetTester tester) async {
@@ -105,6 +130,11 @@ class _FakeImmichClient extends ImmichApiClient {
       issue = null,
       message = null;
 
+  _FakeImmichClient.missingStatistics()
+    : _mode = _FakeMode.missingStatistics,
+      issue = null,
+      message = null;
+
   _FakeImmichClient.failure(this.issue, this.message)
     : _mode = _FakeMode.failure;
 
@@ -127,6 +157,14 @@ class _FakeImmichClient extends ImmichApiClient {
         usageBytes: 1024,
         message: 'Read-only Immich API check completed.',
       ),
+      _FakeMode.missingStatistics => const ImmichConnectionReport(
+        serverUrl: 'http://localhost:2283/api/',
+        pingOk: true,
+        authenticated: true,
+        version: '1.140.0',
+        message:
+            'Server info verified. Statistics were not available with this key.',
+      ),
       _FakeMode.failure => throw ImmichConnectionException(
         issue ?? ImmichConnectionIssue.unexpectedResponse,
         message ?? 'boom',
@@ -135,7 +173,7 @@ class _FakeImmichClient extends ImmichApiClient {
   }
 }
 
-enum _FakeMode { success, failure }
+enum _FakeMode { success, missingStatistics, failure }
 
 class _FakeChecklistStore extends ImmichChecklistStore {
   _FakeChecklistStore() : super(baseDirectory: Directory('.'));
