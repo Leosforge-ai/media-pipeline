@@ -31,10 +31,8 @@ void main() {
   group('ImmichApiClient', () {
     test('rejects a bad server URL before making requests', () async {
       final client = ImmichApiClient(
-        get: (uri, headers) async => const ImmichHttpResponse(
-          statusCode: 200,
-          body: '{"res":"pong"}',
-        ),
+        get: (uri, headers) async =>
+            const ImmichHttpResponse(statusCode: 200, body: '{"res":"pong"}'),
       );
 
       await expectLater(
@@ -51,29 +49,32 @@ void main() {
       );
     });
 
-    test('reports the server as unavailable when ping cannot connect', () async {
-      final client = ImmichApiClient(
-        get: (uri, headers) async {
-          throw const SocketException('Connection refused');
-        },
-      );
+    test(
+      'reports the server as unavailable when ping cannot connect',
+      () async {
+        final client = ImmichApiClient(
+          get: (uri, headers) async {
+            throw const SocketException('Connection refused');
+          },
+        );
 
-      await expectLater(
-        client.check(
-          const ImmichConnectionSettings(
-            serverUrl: 'http://localhost:2283',
-            apiKey: 'secret',
+        await expectLater(
+          client.check(
+            const ImmichConnectionSettings(
+              serverUrl: 'http://localhost:2283',
+              apiKey: 'secret',
+            ),
           ),
-        ),
-        throwsA(
-          isA<ImmichConnectionException>().having(
-            (error) => error.issue,
-            'issue',
-            ImmichConnectionIssue.serverUnavailable,
+          throwsA(
+            isA<ImmichConnectionException>().having(
+              (error) => error.issue,
+              'issue',
+              ImmichConnectionIssue.serverUnavailable,
+            ),
           ),
-        ),
-      );
-    });
+        );
+      },
+    );
 
     test(
       'checks ping, about, and statistics using read-only GET requests',
@@ -221,42 +222,42 @@ void main() {
       );
     });
 
-    test('reports missing statistics permission without failing the check', () async {
-      final client = ImmichApiClient(
-        get: (uri, headers) async {
-          return switch (uri.path) {
-            '/api/server/ping' => const ImmichHttpResponse(
-              statusCode: 200,
-              body: '{"res":"pong"}',
-            ),
-            '/api/server/about' => ImmichHttpResponse(
-              statusCode: 200,
-              body: jsonEncode({'version': '1.140.0', 'licensed': false}),
-            ),
-            '/api/server/statistics' => const ImmichHttpResponse(
-              statusCode: 403,
-              body: '{}',
-            ),
-            _ => const ImmichHttpResponse(statusCode: 404, body: '{}'),
-          };
-        },
-      );
+    test(
+      'reports missing statistics permission without failing the check',
+      () async {
+        final client = ImmichApiClient(
+          get: (uri, headers) async {
+            return switch (uri.path) {
+              '/api/server/ping' => const ImmichHttpResponse(
+                statusCode: 200,
+                body: '{"res":"pong"}',
+              ),
+              '/api/server/about' => ImmichHttpResponse(
+                statusCode: 200,
+                body: jsonEncode({'version': '1.140.0', 'licensed': false}),
+              ),
+              '/api/server/statistics' => const ImmichHttpResponse(
+                statusCode: 403,
+                body: '{}',
+              ),
+              _ => const ImmichHttpResponse(statusCode: 404, body: '{}'),
+            };
+          },
+        );
 
-      final report = await client.check(
-        const ImmichConnectionSettings(
-          serverUrl: 'http://localhost:2283',
-          apiKey: 'secret',
-        ),
-      );
+        final report = await client.check(
+          const ImmichConnectionSettings(
+            serverUrl: 'http://localhost:2283',
+            apiKey: 'secret',
+          ),
+        );
 
-      expect(report.pingOk, isTrue);
-      expect(report.authenticated, isTrue);
-      expect(report.photos, isNull);
-      expect(report.videos, isNull);
-      expect(
-        report.message,
-        contains('lacks server.statistics permission'),
-      );
-    });
+        expect(report.pingOk, isTrue);
+        expect(report.authenticated, isTrue);
+        expect(report.photos, isNull);
+        expect(report.videos, isNull);
+        expect(report.message, contains('lacks server.statistics permission'));
+      },
+    );
   });
 }

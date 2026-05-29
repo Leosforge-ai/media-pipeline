@@ -26,6 +26,8 @@ Use LAN/VPN access first. Avoid exposing Immich directly to the public internet 
 
 Immich can automatically upload selected albums when the app opens/resumes and periodically in the background. Background behavior still depends on iOS/Android rules.
 
+The desktop app also keeps a local phone checklist so you can track which devices are ready without storing secrets. The checklist is saved as JSON in the app's local data folder.
+
 ## Android Backup Notes
 
 - Disable battery optimization for Immich if background backup stalls.

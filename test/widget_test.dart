@@ -1,4 +1,9 @@
+import 'dart:io';
+import 'dart:ui';
+
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_pipeline_app/src/immich_phone_checklist_store.dart';
 import 'package:media_pipeline_app/src/immich_connection.dart';
 import 'package:media_pipeline_app/src/media_pipeline_app.dart';
 
@@ -63,6 +68,35 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('shows the phone backup checklist controls', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MediaPipelineApp(
+        immichClient: _FakeImmichClient.success(),
+        checklistStore: _FakeChecklistStore(),
+      ),
+    );
+
+    await tester.tap(find.text('Immich'));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Phone Backup Checklist'), findsOneWidget);
+    expect(find.text('Add phone'), findsOneWidget);
+    expect(find.textContaining('Stored locally at:'), findsOneWidget);
+    expect(find.text('App installed'), findsOneWidget);
+    expect(find.text('Server login confirmed'), findsOneWidget);
+    expect(find.text('Albums selected'), findsOneWidget);
+    expect(find.text('Backup enabled'), findsOneWidget);
+    expect(find.text('First upload observed'), findsOneWidget);
+    expect(find.text('Background permissions reviewed'), findsOneWidget);
+  });
 }
 
 class _FakeImmichClient extends ImmichApiClient {
@@ -102,3 +136,18 @@ class _FakeImmichClient extends ImmichApiClient {
 }
 
 enum _FakeMode { success, failure }
+
+class _FakeChecklistStore extends ImmichChecklistStore {
+  _FakeChecklistStore() : super(baseDirectory: Directory('.'));
+
+  @override
+  String get filePath => '/tmp/media_pipeline/immich_phone_checklists.json';
+
+  @override
+  Future<List<ImmichPhoneBackupChecklist>> load() async {
+    return [ImmichPhoneBackupChecklist.empty(id: 'phone-1')];
+  }
+
+  @override
+  Future<void> save(List<ImmichPhoneBackupChecklist> checklists) async {}
+}

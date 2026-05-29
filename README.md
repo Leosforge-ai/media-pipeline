@@ -70,6 +70,12 @@ Windows, and ChromeOS through the ChromeOS Linux environment. The app wraps the
 existing scripts and keeps the same safety model: dry-runs first, explicit
 confirm actions, and no permanent deletion.
 
+Immich in the app currently covers the help library, read-only server checks,
+and a locally saved phone backup checklist. See
+[`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md) and
+[`docs/IMMICH_HELP_LIBRARY.md`](docs/IMMICH_HELP_LIBRARY.md) for the practical
+setup notes.
+
 Run the app during development:
 
 ```bash
