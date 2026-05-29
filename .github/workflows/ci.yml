@@ -27,7 +27,7 @@ jobs:
           sudo apt-get install -y shellcheck shfmt
 
       - name: Run ShellCheck
-        run: shellcheck scripts/*.sh config/*.sh
+        run: shellcheck -x -e SC1091 scripts/*.sh config/*.sh
 
       - name: Check shell formatting
         run: shfmt -d scripts/*.sh config/*.sh
@@ -52,6 +52,9 @@ jobs:
 
       - name: Run Ruff
         run: ruff check scripts config
+
+      - name: Run Bash and Python unit tests
+        run: python -m unittest discover -s tests
 
   yaml-and-compose:
     name: YAML and Docker Compose validation

@@ -25,27 +25,27 @@ Notes:
 EOF
 
 if [[ $# -eq 0 ]]; then
-  echo
-  echo "No folders supplied. Listing remote folders only:"
-  rclone lsf "$REMOTE:" --dirs-only
-  exit 0
+	echo
+	echo "No folders supplied. Listing remote folders only:"
+	rclone lsf "$REMOTE:" --dirs-only
+	exit 0
 fi
 
 INCLUDE='{jpg,jpeg,png,heic,heif,webp,gif,mp4,mov,m4v,avi,mkv,3gp,webm,JPG,JPEG,PNG,HEIC,HEIF,WEBP,GIF,MP4,MOV,M4V,AVI,MKV,3GP,WEBM}'
 
 for folder in "$@"; do
-  clean_name="${folder%/}"
-  clean_name="${clean_name% }"
-  [[ -n "$clean_name" ]] || clean_name="gdrive_folder"
-  target="$DEST/$clean_name"
-  mkdir -p "$target"
-  echo "==> Copying $REMOTE:$folder -> $target"
-  rclone copy "$REMOTE:$folder" "$target" \
-    --include "*.$INCLUDE" \
-    --progress \
-    --transfers 4 \
-    --checkers 8
- done
+	clean_name="${folder%/}"
+	clean_name="${clean_name% }"
+	[[ -n "$clean_name" ]] || clean_name="gdrive_folder"
+	target="$DEST/$clean_name"
+	mkdir -p "$target"
+	echo "==> Copying $REMOTE:$folder -> $target"
+	rclone copy "$REMOTE:$folder" "$target" \
+		--include "*.$INCLUDE" \
+		--progress \
+		--transfers 4 \
+		--checkers 8
+done
 
 echo "==> Google Drive import complete"
 du -sh "$DEST" || true
