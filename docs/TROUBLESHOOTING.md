@@ -197,6 +197,65 @@ docker compose up -d
 
 ---
 
+## Immich shows duplicate assets after external-library scan
+
+Check whether the duplicate assets come from real duplicate files in the
+external library. Google Photos Takeout can create both canonical and localized
+year folders:
+
+```text
+/mnt/target_drive/immich_library/Takeout/Google Fotos/2024/IMG_1951.HEIC
+/mnt/target_drive/immich_library/Takeout/Google Fotos/Fotos de 2024/IMG_1951.HEIC
+```
+
+Immich scans external-library files from disk, so both paths can appear as
+separate timeline assets. Do not expect Immich jobs such as thumbnails,
+metadata extraction, OCR, face detection, or transcoding to remove duplicate
+source files.
+
+Dry-run the conservative cleanup:
+
+```bash
+./scripts/12_clean_immich_takeout_duplicates.sh | tee /tmp/immich_takeout_duplicates_dry_run.txt
+```
+
+The script only considers direct files under:
+
+```text
+Takeout/Google Fotos/Fotos de YYYY/
+```
+
+It moves nothing unless a matching canonical file exists under:
+
+```text
+Takeout/Google Fotos/YYYY/
+```
+
+The files must have the same basename, same size, and same SHA-256 hash.
+
+If the dry-run is correct:
+
+```bash
+cd /mnt/target_drive/immich_app
+docker compose down
+cd /path/to/media-pipeline
+./scripts/12_clean_immich_takeout_duplicates.sh --confirm
+cd /mnt/target_drive/immich_app
+docker compose up -d
+```
+
+Then rescan the external library path in Immich:
+
+```text
+/library
+```
+
+Do not use this script for `Destaques/`, `Albums/`, wedding folders, Google
+Drive folders, or custom folders. Those need a separate report because they
+may contain unique files or album-only copies.
+
+---
+
 ## Immich environment changes do not apply
 
 Recreate containers:

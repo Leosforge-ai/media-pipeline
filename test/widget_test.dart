@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,6 +23,12 @@ void main() {
     expect(find.text('Immich Help'), findsOneWidget);
     expect(find.text('Phone Backup'), findsOneWidget);
     expect(find.text('Private Docker Server'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Takeout Duplicates'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(find.text('Takeout Duplicates'), findsOneWidget);
   });
 
   testWidgets('shows Immich connection section', (WidgetTester tester) async {

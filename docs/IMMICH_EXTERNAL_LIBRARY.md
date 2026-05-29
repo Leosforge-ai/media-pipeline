@@ -50,6 +50,61 @@ Then select:
 Scan All Library Files
 ```
 
+## Clean Takeout localized year duplicates
+
+If the external library contains both canonical Google Photos year folders and
+localized copies, Immich will scan both paths as separate assets:
+
+```text
+/library/Takeout/Google Fotos/2024/IMG_1951.HEIC
+/library/Takeout/Google Fotos/Fotos de 2024/IMG_1951.HEIC
+```
+
+Fix this in the filesystem before or between Immich scans. Do not rely on
+thumbnail generation, metadata extraction, OCR, face detection, transcoding, or
+the Immich duplicate review page to clean up duplicate source files.
+
+Dry-run the targeted cleanup:
+
+```bash
+./scripts/12_clean_immich_takeout_duplicates.sh | tee /tmp/immich_takeout_duplicates_dry_run.txt
+```
+
+The script only targets direct files under:
+
+```text
+/mnt/target_drive/immich_library/Takeout/Google Fotos/Fotos de YYYY/
+```
+
+It keeps the matching canonical file under:
+
+```text
+/mnt/target_drive/immich_library/Takeout/Google Fotos/YYYY/
+```
+
+A file is moved only when the canonical file exists with the same basename,
+same size, and same SHA-256 hash. Confirm mode still never deletes files; it
+moves verified duplicates into a timestamped folder under `media_trash`.
+
+Before confirm mode:
+
+1. Stop Immich.
+2. Inspect the dry-run output.
+3. Run confirm mode only if the plan is correct:
+
+```bash
+./scripts/12_clean_immich_takeout_duplicates.sh --confirm
+```
+
+After confirm mode:
+
+1. Restart Immich.
+2. Rescan the external library path:
+
+```text
+/library
+```
+
 ## Verify from shell
 
 ```bash

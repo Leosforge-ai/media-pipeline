@@ -24,7 +24,9 @@ This project was built from real-world failure cases: `.tgz` Takeout archives, b
 8. Runs a safe dry-run duplicate move plan.
 9. Moves duplicates into `media_trash` only after explicit confirmation.
 10. Copies the cleaned library into `immich_library`.
-11. Installs and configures Immich with:
+11. Optionally dry-runs and confirms a targeted Immich-library cleanup for
+    Google Takeout `Fotos de YYYY` year-folder duplicates.
+12. Installs and configures Immich with:
    - Immich upload storage at `/data`,
    - cleaned read-only external library at `/library`.
 
@@ -76,6 +78,7 @@ Current app status:
 - shows Immich help and private-server setup guidance;
 - checks Immich with read-only API requests and a statistics panel;
 - tracks phone backup setup in a local non-secret checklist.
+- includes a dry-run step for Google Takeout localized duplicate cleanup in the Immich library.
 
 Useful docs:
 
@@ -134,6 +137,21 @@ Copy cleaned files into Immich library:
 
 ```bash
 ./scripts/08_sync_to_immich_library.sh
+```
+
+If Immich has duplicate timeline assets from Google Takeout localized year
+folders, dry-run the targeted external-library cleanup before or between
+Immich scans:
+
+```bash
+./scripts/12_clean_immich_takeout_duplicates.sh | tee /tmp/immich_takeout_duplicates_dry_run.txt
+```
+
+Inspect first. Only after review, optionally move verified duplicates from
+`Takeout/Google Fotos/Fotos de YYYY/` into `media_trash`:
+
+```bash
+./scripts/12_clean_immich_takeout_duplicates.sh --confirm
 ```
 
 Install/start Immich:
@@ -250,6 +268,7 @@ Ubuntu or Debian-like Linux is recommended. The dependency script installs:
 - Some corrupted videos may not accept metadata writes; these are logged and still moved into staging.
 - Similar-image and similar-video detection can have false positives. Review dry-runs.
 - Read-only Immich external libraries cannot be modified by Immich. If you trash items in Immich, the original files may reappear after rescan because the read-only mount prevents Immich from deleting originals.
+- If Immich shows duplicate assets from `Takeout/Google Fotos/YYYY/` and `Takeout/Google Fotos/Fotos de YYYY/`, fix the duplicate source files in `immich_library` with `12_clean_immich_takeout_duplicates.sh`, then restart Immich and rescan `/library`.
 
 
 ## CodeRabbit and CI/CD

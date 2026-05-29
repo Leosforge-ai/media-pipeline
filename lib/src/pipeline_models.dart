@@ -182,6 +182,18 @@ List<PipelineStep> buildPipelineSteps() {
       requiredTools: ['rsync'],
     ),
     PipelineStep(
+      id: 'immich-takeout-duplicate-dry-run',
+      title: 'Review Immich Takeout Duplicates',
+      description:
+          'Dry-run the localized Takeout duplicate cleanup for Immich only.',
+      risk: PipelineRisk.safe,
+      command: PipelineCommand('bash', [
+        'scripts/12_clean_immich_takeout_duplicates.sh',
+      ]),
+      requiredTools: ['sha256sum'],
+      linuxOnly: true,
+    ),
+    PipelineStep(
       id: 'setup-immich',
       title: 'Set Up Immich',
       description: 'Generate Immich configuration and start Docker Compose.',

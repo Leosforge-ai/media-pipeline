@@ -86,6 +86,27 @@ Keep Immich upload storage and external-library storage conceptually separate:
 - `/library` is this project's cleaned external library.
 - backups must include both if you depend on both.
 
+## Takeout Duplicates
+
+Google Photos Takeout can create both canonical year folders and localized duplicates for the same media. In this repository, the common pattern is:
+
+```text
+Takeout/Google Fotos/2024/
+Takeout/Google Fotos/Fotos de 2024/
+```
+
+Immich scans filesystem paths as separate assets. If both copies exist in the external library, both will appear in the timeline. The app therefore provides a dry-run-only cleanup step for the localized `Fotos de YYYY` folder family.
+
+That cleanup script:
+
+- only considers direct files inside `Takeout/Google Fotos/Fotos de YYYY/`;
+- keeps the matching `Takeout/Google Fotos/YYYY/` file;
+- requires matching basename, size, and SHA-256 hash before moving anything;
+- moves verified duplicates to `media_trash`, never deleting them;
+- requires a separate typed confirmation before any move happens.
+
+Run the dry-run before or between Immich scans. After confirm mode, restart Immich and rescan `/library`.
+
 ## Memories
 
 Immich can show memories from server-side assets. The planned app memory-curator feature will build on this by:

@@ -975,6 +975,15 @@ class _HelpDetail extends StatelessWidget {
             ],
           ),
           const _HelpSection(
+            icon: Icons.collections,
+            title: 'Takeout Duplicates',
+            bullets: [
+              'Google Takeout can create both canonical year folders and localized duplicates such as Fotos de 2024.',
+              'Immich scans each filesystem path as a separate asset, so both folders can appear in the timeline.',
+              'Use the dry-run duplicate cleanup step to review only the localized Fotos de YYYY copies before any move.',
+            ],
+          ),
+          const _HelpSection(
             icon: Icons.auto_awesome,
             title: 'Memories Direction',
             bullets: [

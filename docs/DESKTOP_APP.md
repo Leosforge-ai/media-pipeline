@@ -45,6 +45,7 @@ The app includes an **Immich Help** section for the parts users normally need wh
 - Android and iPhone background-upload caveats;
 - phone backup checklist state stored locally as JSON;
 - external-library setup for `/library`;
+- Google Takeout localized year duplicates and the dry-run cleanup step;
 - future private memories and notification direction;
 - database and media backup safety.
 

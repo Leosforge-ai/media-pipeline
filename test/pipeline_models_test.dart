@@ -52,4 +52,19 @@ void main() {
       'RUN_BLUR_SCAN': '0',
     });
   });
+
+  test('immich takeout duplicate dry-run is safe and linux only', () {
+    final step = buildPipelineSteps().singleWhere(
+      (step) => step.id == 'immich-takeout-duplicate-dry-run',
+    );
+
+    expect(step.command.arguments, [
+      'scripts/12_clean_immich_takeout_duplicates.sh',
+    ]);
+    expect(step.command.arguments, isNot(contains('--confirm')));
+    expect(step.risk, PipelineRisk.safe);
+    expect(step.linuxOnly, isTrue);
+    expect(step.requiredTools, contains('sha256sum'));
+    expect(step.requiresDryRunStepId, isNull);
+  });
 }
