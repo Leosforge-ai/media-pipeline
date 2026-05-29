@@ -43,7 +43,12 @@ void main() {
 
   testWidgets('shows Immich connection errors', (WidgetTester tester) async {
     await tester.pumpWidget(
-      MediaPipelineApp(immichClient: _FakeImmichClient.failure()),
+      MediaPipelineApp(
+        immichClient: _FakeImmichClient.failure(
+          ImmichConnectionIssue.serverUnavailable,
+          'Immich server is not reachable: Connection refused',
+        ),
+      ),
     );
 
     await tester.tap(find.text('Immich'));
@@ -52,17 +57,26 @@ void main() {
     await tester.tap(find.text('Check Connection'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Connection failed'), findsOneWidget);
-    expect(find.text('boom'), findsOneWidget);
+    expect(find.text('Server unreachable'), findsOneWidget);
+    expect(
+      find.text('Immich server is not reachable: Connection refused'),
+      findsOneWidget,
+    );
   });
 }
 
 class _FakeImmichClient extends ImmichApiClient {
-  _FakeImmichClient.success() : _mode = _FakeMode.success;
+  _FakeImmichClient.success()
+    : _mode = _FakeMode.success,
+      issue = null,
+      message = null;
 
-  _FakeImmichClient.failure() : _mode = _FakeMode.failure;
+  _FakeImmichClient.failure(this.issue, this.message)
+    : _mode = _FakeMode.failure;
 
   final _FakeMode _mode;
+  final ImmichConnectionIssue? issue;
+  final String? message;
 
   @override
   Future<ImmichConnectionReport> check(
@@ -79,7 +93,10 @@ class _FakeImmichClient extends ImmichApiClient {
         usageBytes: 1024,
         message: 'Read-only Immich API check completed.',
       ),
-      _FakeMode.failure => throw const ImmichConnectionException('boom'),
+      _FakeMode.failure => throw ImmichConnectionException(
+        issue ?? ImmichConnectionIssue.unexpectedResponse,
+        message ?? 'boom',
+      ),
     };
   }
 }

@@ -53,7 +53,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   String? _runningStepId;
   bool _checkingImmich = false;
   ImmichConnectionReport? _immichReport;
-  String? _immichError;
+  ImmichConnectionException? _immichFailure;
 
   PipelineStep get _selectedStep => _steps[_selectedIndex];
 
@@ -133,7 +133,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
 
     setState(() {
       _checkingImmich = true;
-      _immichError = null;
+      _immichFailure = null;
       _immichReport = null;
     });
 
@@ -148,21 +148,21 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
         return;
       }
       setState(() => _immichReport = report);
-    } on FormatException catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() => _immichError = error.message);
     } on ImmichConnectionException catch (error) {
       if (!mounted) {
         return;
       }
-      setState(() => _immichError = error.message);
+      setState(() => _immichFailure = error);
     } catch (error) {
       if (!mounted) {
         return;
       }
-      setState(() => _immichError = 'Immich check failed: $error');
+      setState(
+        () => _immichFailure = ImmichConnectionException(
+          ImmichConnectionIssue.unexpectedResponse,
+          'Immich check failed: $error',
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() => _checkingImmich = false);
@@ -259,7 +259,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   apiKeyController: _immichApiKeyController,
                   checking: _checkingImmich,
                   report: _immichReport,
-                  error: _immichError,
+                  failure: _immichFailure,
                   onCheck: _checkImmichConnection,
                 ),
                 _AppMode.help => const _HelpDetail(),
@@ -333,7 +333,7 @@ class _ImmichConnectionDetail extends StatelessWidget {
     required this.apiKeyController,
     required this.checking,
     required this.report,
-    required this.error,
+    required this.failure,
     required this.onCheck,
   });
 
@@ -341,7 +341,7 @@ class _ImmichConnectionDetail extends StatelessWidget {
   final TextEditingController apiKeyController;
   final bool checking;
   final ImmichConnectionReport? report;
-  final String? error;
+  final ImmichConnectionException? failure;
   final VoidCallback onCheck;
 
   @override
@@ -393,11 +393,17 @@ class _ImmichConnectionDetail extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          if (error != null)
+          if (failure != null)
             _StatusPanel(
-              icon: Icons.error,
-              title: 'Connection failed',
-              lines: [error!],
+              icon: _failureIcon(failure!.issue),
+              title: _failureTitle(failure!.issue),
+              lines: [
+                failure!.message,
+                if (failure!.issue == ImmichConnectionIssue.serverUnavailable)
+                  'Try the manual curl checks in the docs to confirm whether the server is reachable.',
+                if (failure!.issue == ImmichConnectionIssue.invalidApiKey)
+                  'Create a new key in the Immich web app and make sure it can read server.about.',
+              ],
               isError: true,
             )
           else if (report != null)
@@ -919,4 +925,24 @@ String _formatBytes(int bytes) {
   }
   final decimals = value >= 10 || unitIndex == 0 ? 0 : 1;
   return '${value.toStringAsFixed(decimals)} ${units[unitIndex]}';
+}
+
+IconData _failureIcon(ImmichConnectionIssue issue) {
+  return switch (issue) {
+    ImmichConnectionIssue.invalidServerUrl => Icons.link_off,
+    ImmichConnectionIssue.serverUnavailable => Icons.cloud_off,
+    ImmichConnectionIssue.invalidApiKey => Icons.key_off,
+    ImmichConnectionIssue.missingPermission => Icons.no_accounts,
+    ImmichConnectionIssue.unexpectedResponse => Icons.warning_amber,
+  };
+}
+
+String _failureTitle(ImmichConnectionIssue issue) {
+  return switch (issue) {
+    ImmichConnectionIssue.invalidServerUrl => 'Check the server URL',
+    ImmichConnectionIssue.serverUnavailable => 'Server unreachable',
+    ImmichConnectionIssue.invalidApiKey => 'API key rejected',
+    ImmichConnectionIssue.missingPermission => 'Missing permission',
+    ImmichConnectionIssue.unexpectedResponse => 'Unexpected response',
+  };
 }

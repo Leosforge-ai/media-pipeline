@@ -69,6 +69,13 @@ curl -i -H "x-api-key: YOUR_API_KEY" http://localhost:2283/api/server/statistics
 
 Replace `http://localhost:2283` with your own private Immich URL and `YOUR_API_KEY` with a key from your Immich web app. These commands reproduce the app checks outside the UI, which is useful for troubleshooting connectivity and permissions.
 
+Common failure meanings:
+
+- `Invalid URL` usually means the server URL is malformed. Check the scheme, host, port, path, whitespace, and typos so the app can reach the right Immich base URL.
+- `Server unreachable` usually means the URL is wrong, the container is down, or the app cannot reach your LAN/VPN network.
+- `API key rejected` usually means the key is invalid or missing `server.about` access.
+- `Missing permission` means the key can talk to Immich, but it does not have `server.statistics`; the app can still verify the server and read basic info.
+
 ## Safety Notes
 
 - The app never adds `--confirm` to dry-run commands.
