@@ -650,6 +650,12 @@ class _PhoneBackupChecklistSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
+    final completedChecklists = checklists.isEmpty
+        ? 0
+        : checklists
+            .map(checklistProgressCompleteCount)
+            .fold<int>(0, (total, count) => total + count);
+    final totalChecklistsProgress = checklists.length * checklistProgressTotalCount;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -670,6 +676,13 @@ class _PhoneBackupChecklistSection extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text('Stored locally at: $storagePath', style: textTheme.bodySmall),
+        if (checklists.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Overall progress: $completedChecklists/$totalChecklistsProgress complete across ${checklists.length} phone${checklists.length == 1 ? '' : 's'}',
+            style: textTheme.bodySmall,
+          ),
+        ],
         const SizedBox(height: 12),
         Align(
           alignment: Alignment.centerLeft,
@@ -801,6 +814,11 @@ class _PhoneBackupChecklistCardState extends State<_PhoneBackupChecklistCard> {
                   icon: const Icon(Icons.delete_outline),
                 ),
               ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Progress: ${checklistProgressCompleteCount(widget.checklist)}/$checklistProgressTotalCount complete',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
             CheckboxListTile(

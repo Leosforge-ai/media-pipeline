@@ -184,6 +184,19 @@ String? _stringValue(Object? value) {
 
 bool _boolValue(Object? value) => value is bool ? value : false;
 
+int checklistProgressCompleteCount(ImmichPhoneBackupChecklist checklist) {
+  return [
+    checklist.appInstalled,
+    checklist.serverLoginConfirmed,
+    checklist.albumsSelected,
+    checklist.backupEnabled,
+    checklist.firstUploadObserved,
+    checklist.backgroundPermissionsReviewed,
+  ].where((checked) => checked).length;
+}
+
+const int checklistProgressTotalCount = 6;
+
 String _newChecklistId() {
   return DateTime.now().microsecondsSinceEpoch.toString();
 }

@@ -110,11 +110,16 @@ void main() {
     );
 
     await tester.tap(find.text('Immich'));
-    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pumpAndSettle();
 
     expect(find.text('Phone Backup Checklist'), findsOneWidget);
     expect(find.text('Add phone'), findsOneWidget);
     expect(find.textContaining('Stored locally at:'), findsOneWidget);
+    expect(
+      find.text('Overall progress: 0/6 complete across 1 phone'),
+      findsOneWidget,
+    );
+    expect(find.text('Progress: 0/6 complete'), findsOneWidget);
     expect(find.text('App installed'), findsOneWidget);
     expect(find.text('Server login confirmed'), findsOneWidget);
     expect(find.text('Albums selected'), findsOneWidget);
