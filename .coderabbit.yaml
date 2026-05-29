@@ -24,11 +24,13 @@ reviews:
     enabled: true
     drafts: false
   path_filters:
+    - "**/*.dart"
     - "**/*.sh"
     - "**/*.py"
     - "**/*.yml"
     - "**/*.yaml"
     - "**/*.md"
+    - "pubspec.lock"
     - "Dockerfile"
     - "docker-compose*.yml"
     - "!.git/**"
@@ -57,6 +59,15 @@ reviews:
         Python code must continue on corrupt individual media files where safe, log
         warnings clearly, avoid loading huge media files into memory, and preserve
         metadata behavior.
+    - path: "lib/**/*.dart"
+      instructions: >-
+        Flutter app code must preserve the dry-run-first workflow, never construct
+        confirm commands implicitly, keep process output visible, and avoid storing
+        secrets or personal paths in tracked files.
+    - path: "test/**/*.dart"
+      instructions: >-
+        App tests should exercise safety gates, command construction, environment
+        passing, and app-driven simulations against temporary media roots.
     - path: "immich/**"
       instructions: >-
         Immich upload storage (/data) must stay separate from the external media
