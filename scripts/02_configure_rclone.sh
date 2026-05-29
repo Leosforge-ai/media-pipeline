@@ -19,6 +19,6 @@ rclone config
 
 echo
 rclone lsf gdrive: --dirs-only || {
-  echo "ERROR: Could not list gdrive:. Re-run rclone config and verify the remote name is gdrive."
-  exit 1
+	echo "ERROR: Could not list gdrive:. Re-run rclone config and verify the remote name is gdrive."
+	exit 1
 }

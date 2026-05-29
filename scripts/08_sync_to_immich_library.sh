@@ -18,8 +18,10 @@ rsync -aH --info=progress2 "$CLEANING_STAGING/" "$IMMICH_LIBRARY/"
 
 echo "==> Verification"
 du -sh "$CLEANING_STAGING" "$IMMICH_LIBRARY"
-printf 'cleaning_staging files: '; find "$CLEANING_STAGING" -type f | wc -l
-printf 'immich_library files:   '; find "$IMMICH_LIBRARY" -type f | wc -l
+printf 'cleaning_staging files: '
+find "$CLEANING_STAGING" -type f | wc -l
+printf 'immich_library files:   '
+find "$IMMICH_LIBRARY" -type f | wc -l
 
 echo "==> Make library readable by Immich containers"
 chmod -R a+rX "$IMMICH_LIBRARY"
