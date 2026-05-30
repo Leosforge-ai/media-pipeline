@@ -67,6 +67,9 @@ desktop-app preview panel that renders sample read-only candidates for prior
 year, album, and location groupings. The preview still does not call Immich or
 write memories.
 
+The next implementation step is a read-only Immich adapter documented in
+[`docs/MEMORY_PREVIEW_IMMICH_ADAPTER.md`](MEMORY_PREVIEW_IMMICH_ADAPTER.md).
+
 ## Phase 5: Create Memories In Immich
 
 - Add explicit user approval before creating or updating Immich memories.
