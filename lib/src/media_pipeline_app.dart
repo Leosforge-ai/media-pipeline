@@ -1105,6 +1105,7 @@ class _MemoryPreviewDetail extends StatelessWidget {
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final referenceDate = DateTime(2026, 5, 29);
+    final trimmedMessage = message?.trim();
     final preview = switch (displayState) {
       MemoryPreviewDisplayState.sampleReady => buildMemoryPreviewCandidates(
         referenceDate: referenceDate,
@@ -1146,7 +1147,8 @@ class _MemoryPreviewDetail extends StatelessWidget {
                 'Reference date: 2026-05-29',
               if (displayState == MemoryPreviewDisplayState.sampleReady)
                 '${preview!.candidates.length} candidates, ${preview.exclusions.length} excluded assets in sample data.',
-              if (message != null && message!.trim().isNotEmpty) message!.trim(),
+              if (trimmedMessage != null && trimmedMessage.isNotEmpty)
+                trimmedMessage,
             ],
           ),
           const SizedBox(height: 16),
