@@ -70,6 +70,14 @@ If `server.statistics` is unavailable or not allowed, the app should still verif
 - Be careful with any cleanup/free-space action because iCloud Photos is a two-way sync, not a separate backup copy.
 - For the first backup, keep the app foregrounded and the phone charging until you have observed at least one successful upload in Immich.
 
+## Backup Troubleshooting
+
+- If uploads stall, keep Immich open in the foreground until the first upload appears in the server job queue.
+- On Android, disable battery optimization for Immich and check for manufacturer-specific background limits.
+- On iPhone, disable Low Power Mode and keep Background App Refresh enabled for Immich.
+- If the server URL does not work, confirm that it points to your private LAN, VPN, or localhost Immich server on port 2283.
+- Validate the first upload before relying on background sync for new photos or videos.
+
 ## External Libraries
 
 External libraries let Immich scan media stored outside its upload folder. In this project, the cleaned library is mounted into Immich as `/library` and should be read-only.

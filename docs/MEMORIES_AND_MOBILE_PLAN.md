@@ -49,6 +49,10 @@ Status: in progress. The desktop app now has an **Immich** section that keeps th
   - background permissions reviewed.
 - Add troubleshooting guidance for stalled background uploads, iOS Low Power Mode, Android battery optimization, and wrong server URL.
 
+Status: in progress. The desktop app now includes a phone backup checklist and a
+compact troubleshooting section for stalled uploads, Android battery
+optimization, iPhone Low Power Mode, and private server URL mistakes.
+
 ## Phase 4: Memory Curator Preview
 
 - Query Immich assets and existing memories through the Immich API.

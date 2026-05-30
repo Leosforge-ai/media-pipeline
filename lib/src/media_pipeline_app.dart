@@ -1037,6 +1037,16 @@ class _HelpDetail extends StatelessWidget {
             ],
           ),
           const _HelpSection(
+            icon: Icons.build_circle,
+            title: 'Backup Troubleshooting',
+            bullets: [
+              'If uploads stall, keep the app foregrounded and confirm the first upload starts before relying on background sync.',
+              'On Android, disable battery optimization and review manufacturer-specific background restrictions for Immich.',
+              'On iPhone, avoid Low Power Mode and keep Background App Refresh enabled for Immich.',
+              'If the server URL is wrong, make sure it reaches your private LAN, VPN, or localhost Immich server on port 2283.',
+            ],
+          ),
+          const _HelpSection(
             icon: Icons.photo_library,
             title: 'External Library',
             bullets: [

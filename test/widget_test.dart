@@ -24,6 +24,34 @@ void main() {
     expect(find.text('Phone Backup'), findsOneWidget);
     expect(find.text('Private Docker Server'), findsOneWidget);
     await tester.scrollUntilVisible(
+      find.text('Backup Troubleshooting'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    expect(find.text('Backup Troubleshooting'), findsOneWidget);
+    expect(
+      find.textContaining('If the server URL is wrong'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(
+        'If uploads stall, keep the app foregrounded and confirm the first upload starts before relying on background sync.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(
+        'On Android, disable battery optimization and review manufacturer-specific background restrictions for Immich.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(
+        'On iPhone, avoid Low Power Mode and keep Background App Refresh enabled for Immich.',
+      ),
+      findsOneWidget,
+    );
+    await tester.scrollUntilVisible(
       find.text('Takeout Duplicates'),
       200,
       scrollable: find.byType(Scrollable).last,
