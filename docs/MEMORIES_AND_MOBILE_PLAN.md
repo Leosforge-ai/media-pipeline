@@ -69,6 +69,21 @@ write memories.
 
 The next implementation step is a read-only Immich adapter documented in
 [`docs/MEMORY_PREVIEW_IMMICH_ADAPTER.md`](MEMORY_PREVIEW_IMMICH_ADAPTER.md).
+The desktop preview panel also has explicit ready, loading, empty, and error
+states so the UI can move from sample data to real Immich assets without
+changing the preview contract.
+
+Verification:
+
+```bash
+flutter test test/widget_test.dart --plain-name "memory preview"
+```
+
+Expected outcome:
+
+- The widget test covers the sample-ready, loading, empty, and error preview
+  states.
+- The preview panel still renders sample candidates in ready mode.
 
 ## Phase 5: Create Memories In Immich
 
