@@ -43,9 +43,11 @@ This checklist defines what must be true before the Immich work is treated as pr
   ```
 - Verify the memory write approval draft queue stays local-only and requires
   the explicit approval phrase before creating a pending draft.
+
   ```bash
   flutter test --plain-name "memory write draft"
   ```
+
 - Verify the memory preview docs stay read-only and do not describe any write
   path.
   ```bash

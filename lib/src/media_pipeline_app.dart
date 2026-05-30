@@ -1314,8 +1314,10 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
                   'Check the read-only adapter contract and retry the connection.',
             )
           else ...[
-            _MemoryWriteDraftPanel(drafts: _pendingDrafts),
-            const SizedBox(height: 12),
+            if (_pendingDrafts.isNotEmpty) ...[
+              _MemoryWriteDraftPanel(drafts: _pendingDrafts),
+              const SizedBox(height: 12),
+            ],
             for (final candidate in preview!.candidates)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),

@@ -319,6 +319,27 @@ void main() {
     );
     expect(find.textContaining('(pending)'), findsOneWidget);
   });
+
+  testWidgets('rejects a memory write draft with the wrong approval phrase', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const MediaPipelineApp());
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Prepare top memory write draft'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Approve memory write draft'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).first, 'nope');
+    await tester.tap(find.text('Approve'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Approve memory write draft'), findsOneWidget);
+    expect(find.text('Pending memory approvals'), findsNothing);
+    expect(find.textContaining('(pending)'), findsNothing);
+  });
 }
 
 class _FakeImmichClient extends ImmichApiClient {

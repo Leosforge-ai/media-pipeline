@@ -52,15 +52,19 @@ MemoryWriteDraft createPendingMemoryWriteDraft({
   required MemoryPreviewCandidate candidate,
   required DateTime createdAt,
 }) {
-  final token =
-      '${candidate.title}-${createdAt.microsecondsSinceEpoch}'
-          .replaceAll(RegExp(r'[^A-Za-z0-9-]+'), '-')
-          .replaceAll(RegExp(r'-+'), '-')
-          .replaceAll(RegExp(r'^-+|-+$'), '');
+  final assetIds = [...candidate.assetIds]..sort();
+  final candidateTokenSource = [
+    candidate.title.trim(),
+    ...assetIds,
+  ].where((value) => value.trim().isNotEmpty).join('-');
+  final token = candidateTokenSource
+      .replaceAll(RegExp(r'[^A-Za-z0-9-]+'), '-')
+      .replaceAll(RegExp(r'-+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
   return MemoryWriteDraft(
     id: 'draft-${createdAt.microsecondsSinceEpoch}',
     candidateTitle: candidate.title,
-    assetIds: [...candidate.assetIds],
+    assetIds: assetIds,
     state: MemoryWriteDraftState.pending,
     idempotencyToken: token.isEmpty
         ? 'draft-${createdAt.microsecondsSinceEpoch}'

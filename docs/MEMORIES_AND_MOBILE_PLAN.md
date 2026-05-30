@@ -95,6 +95,7 @@ Expected outcome:
 - The preview panel also exposes a local-only memory write approval draft queue
   for the future write path.
 
+
 ## Phase 5: Create Memories In Immich
 
 - Add explicit user approval before creating or updating Immich memories.
@@ -108,6 +109,13 @@ approval draft queue in the Memories panel, but it still does not send create or
 update requests to Immich. The remote write path remains intentionally split
 into [`docs/MEMORY_WRITE_PATH_DESIGN.md`](MEMORY_WRITE_PATH_DESIGN.md) so the
 approval flow stays reviewed before any network write is added.
+
+Phase 5 verification:
+
+```bash
+flutter test test/memory_write_flow_test.dart
+flutter test test/widget_test.dart --plain-name "memory write draft"
+```
 
 ## Phase 6: Notifications
 
