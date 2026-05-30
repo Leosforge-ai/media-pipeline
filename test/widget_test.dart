@@ -144,6 +144,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Memory Curator Preview'), findsOneWidget);
+    expect(find.text('Preview-only mode.'), findsOneWidget);
     expect(find.text('Preview status'), findsOneWidget);
     expect(find.text('This week in 2024'), findsOneWidget);
     await tester.scrollUntilVisible(
@@ -160,6 +161,65 @@ void main() {
     expect(find.text('Place: Lisbon'), findsOneWidget);
     expect(find.text('Excluded assets'), findsOneWidget);
     expect(find.text('receipt-1: receipt'), findsOneWidget);
+  });
+
+  testWidgets('shows memory curator loading state', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      const MediaPipelineApp(
+        memoryPreviewState: MemoryPreviewDisplayState.loading,
+      ),
+    );
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Preview-only mode.'), findsOneWidget);
+    expect(find.text('Loading preview'), findsOneWidget);
+    expect(find.text('Loading real Immich assets...'), findsOneWidget);
+  });
+
+  testWidgets('shows memory curator empty state', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      const MediaPipelineApp(
+        memoryPreviewState: MemoryPreviewDisplayState.empty,
+      ),
+    );
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No preview candidates yet'), findsOneWidget);
+    expect(
+      find.text(
+        'Connect a private Immich server with readable assets to populate this preview.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('shows memory curator error state', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      const MediaPipelineApp(
+        memoryPreviewState: MemoryPreviewDisplayState.error,
+        memoryPreviewMessage: 'Read-only adapter could not load assets.',
+      ),
+    );
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Preview unavailable'), findsOneWidget);
+    expect(find.text('Unable to load preview assets.'), findsOneWidget);
+    expect(
+      find.text('Read-only adapter could not load assets.'),
+      findsOneWidget,
+    );
   });
 }
 

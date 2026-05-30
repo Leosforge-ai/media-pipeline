@@ -69,6 +69,9 @@ write memories.
 
 The next implementation step is a read-only Immich adapter documented in
 [`docs/MEMORY_PREVIEW_IMMICH_ADAPTER.md`](MEMORY_PREVIEW_IMMICH_ADAPTER.md).
+The desktop preview panel also has explicit ready, loading, empty, and error
+states so the UI can move from sample data to real Immich assets without
+changing the preview contract.
 
 ## Phase 5: Create Memories In Immich
 

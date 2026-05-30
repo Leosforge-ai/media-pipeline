@@ -10,10 +10,18 @@ import 'pipeline_models.dart';
 import 'pipeline_runner.dart';
 
 class MediaPipelineApp extends StatelessWidget {
-  const MediaPipelineApp({super.key, this.immichClient, this.checklistStore});
+  const MediaPipelineApp({
+    super.key,
+    this.immichClient,
+    this.checklistStore,
+    this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
+    this.memoryPreviewMessage,
+  });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  final MemoryPreviewDisplayState memoryPreviewState;
+  final String? memoryPreviewMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -31,16 +39,26 @@ class MediaPipelineApp extends StatelessWidget {
       home: PipelineHomePage(
         immichClient: immichClient,
         checklistStore: checklistStore,
+        memoryPreviewState: memoryPreviewState,
+        memoryPreviewMessage: memoryPreviewMessage,
       ),
     );
   }
 }
 
 class PipelineHomePage extends StatefulWidget {
-  const PipelineHomePage({super.key, this.immichClient, this.checklistStore});
+  const PipelineHomePage({
+    super.key,
+    this.immichClient,
+    this.checklistStore,
+    this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
+    this.memoryPreviewMessage,
+  });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  final MemoryPreviewDisplayState memoryPreviewState;
+  final String? memoryPreviewMessage;
 
   @override
   State<PipelineHomePage> createState() => _PipelineHomePageState();
@@ -356,7 +374,10 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   onCheck: _checkImmichConnection,
                 ),
                 _AppMode.help => const _HelpDetail(),
-                _AppMode.memories => const _MemoryPreviewDetail(),
+                _AppMode.memories => _MemoryPreviewDetail(
+                  displayState: widget.memoryPreviewState,
+                  message: widget.memoryPreviewMessage,
+                ),
               },
             ),
           ],
@@ -367,6 +388,8 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
 }
 
 enum _AppMode { workflow, immich, help, memories }
+
+enum MemoryPreviewDisplayState { sampleReady, loading, empty, error }
 
 class _ImmichNav extends StatelessWidget {
   const _ImmichNav();
@@ -1070,16 +1093,27 @@ class _HelpDetail extends StatelessWidget {
 }
 
 class _MemoryPreviewDetail extends StatelessWidget {
-  const _MemoryPreviewDetail();
+  const _MemoryPreviewDetail({
+    required this.displayState,
+    this.message,
+  });
+
+  final MemoryPreviewDisplayState displayState;
+  final String? message;
 
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final referenceDate = DateTime(2026, 5, 29);
-    final preview = buildMemoryPreviewCandidates(
-      referenceDate: referenceDate,
-      assets: buildMemoryPreviewSampleAssets(),
-    );
+    final preview = switch (displayState) {
+      MemoryPreviewDisplayState.sampleReady => buildMemoryPreviewCandidates(
+        referenceDate: referenceDate,
+        assets: buildMemoryPreviewSampleAssets(),
+      ),
+      MemoryPreviewDisplayState.loading ||
+      MemoryPreviewDisplayState.empty ||
+      MemoryPreviewDisplayState.error => null,
+    };
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -1088,27 +1122,86 @@ class _MemoryPreviewDetail extends StatelessWidget {
           Text('Memory Curator Preview', style: textTheme.headlineSmall),
           const SizedBox(height: 8),
           const Text(
-            'Read-only local scoring preview. This does not call Immich, create memories, or store feedback.',
+            'Preview-only mode. This does not call Immich, create memories, or store feedback.',
           ),
           const SizedBox(height: 20),
           _StatusPanel(
-            icon: Icons.visibility,
+            icon: switch (displayState) {
+              MemoryPreviewDisplayState.sampleReady => Icons.visibility,
+              MemoryPreviewDisplayState.loading => Icons.hourglass_bottom,
+              MemoryPreviewDisplayState.empty => Icons.inbox,
+              MemoryPreviewDisplayState.error => Icons.error_outline,
+            },
             title: 'Preview status',
             lines: [
-              'Rules-based scoring only.',
-              'Reference date: 2026-05-29',
-              '${preview.candidates.length} candidates, ${preview.exclusions.length} excluded assets in sample data.',
+              'Preview-only mode.',
+              switch (displayState) {
+                MemoryPreviewDisplayState.sampleReady => 'Rules-based scoring only.',
+                MemoryPreviewDisplayState.loading => 'Loading real Immich assets...',
+                MemoryPreviewDisplayState.empty => 'No preview assets available yet.',
+                MemoryPreviewDisplayState.error =>
+                  'Unable to load preview assets.',
+              },
+              if (displayState == MemoryPreviewDisplayState.sampleReady)
+                'Reference date: 2026-05-29',
+              if (displayState == MemoryPreviewDisplayState.sampleReady)
+                '${preview!.candidates.length} candidates, ${preview.exclusions.length} excluded assets in sample data.',
+              if (message != null && message!.trim().isNotEmpty) message!.trim(),
             ],
           ),
           const SizedBox(height: 16),
-          for (final candidate in preview.candidates)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: _MemoryPreviewCandidateCard(candidate: candidate),
-            ),
-          _MemoryPreviewExclusionPanel(exclusions: preview.exclusions),
+          if (displayState == MemoryPreviewDisplayState.loading)
+            const _MemoryPreviewPlaceholder(
+              icon: Icons.hourglass_bottom,
+              title: 'Loading preview',
+              subtitle:
+                  'Fetching read-only metadata from Immich before scoring locally.',
+            )
+          else if (displayState == MemoryPreviewDisplayState.empty)
+            const _MemoryPreviewPlaceholder(
+              icon: Icons.inbox,
+              title: 'No preview candidates yet',
+              subtitle:
+                  'Connect a private Immich server with readable assets to populate this preview.',
+            )
+          else if (displayState == MemoryPreviewDisplayState.error)
+            const _MemoryPreviewPlaceholder(
+              icon: Icons.error_outline,
+              title: 'Preview unavailable',
+              subtitle:
+                  'Check the read-only adapter contract and retry the connection.',
+            )
+          else ...[
+            for (final candidate in preview!.candidates)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _MemoryPreviewCandidateCard(candidate: candidate),
+              ),
+            _MemoryPreviewExclusionPanel(exclusions: preview.exclusions),
+          ],
         ],
       ),
+    );
+  }
+}
+
+class _MemoryPreviewPlaceholder extends StatelessWidget {
+  const _MemoryPreviewPlaceholder({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return _StatusPanel(
+      icon: icon,
+      title: title,
+      lines: [subtitle],
     );
   }
 }
