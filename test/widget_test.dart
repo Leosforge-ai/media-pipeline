@@ -1,11 +1,12 @@
 import 'dart:io';
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_pipeline_app/src/immich_phone_checklist_store.dart';
 import 'package:media_pipeline_app/src/immich_connection.dart';
 import 'package:media_pipeline_app/src/media_pipeline_app.dart';
 import 'package:media_pipeline_app/src/memory_curator.dart';
+import 'package:media_pipeline_app/src/memory_write_flow.dart';
 
 void main() {
   testWidgets('renders the desktop shell', (WidgetTester tester) async {
@@ -175,6 +176,11 @@ void main() {
     expect(find.text('Memory Curator Preview'), findsOneWidget);
     expect(find.text('Preview-only mode.'), findsOneWidget);
     expect(find.text('Preview status'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('This week in 2024'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
     expect(find.text('This week in 2024'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Album: Lisbon Week'),
@@ -188,6 +194,11 @@ void main() {
       scrollable: find.byType(Scrollable).last,
     );
     expect(find.text('Place: Lisbon'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Excluded assets'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
     expect(find.text('Excluded assets'), findsOneWidget);
     expect(find.text('receipt-1: receipt'), findsOneWidget);
   });
@@ -212,6 +223,11 @@ void main() {
 
     expect(find.text('Preview source: live Immich assets'), findsOneWidget);
     expect(find.text('Loaded 3 live assets from Immich.'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('This week in 2024'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
     expect(find.text('This week in 2024'), findsOneWidget);
     expect(find.text('Reload from Immich'), findsOneWidget);
   });
@@ -273,6 +289,35 @@ void main() {
       find.text('Read-only adapter could not load assets.'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('queues a local memory write draft after approval', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      const MediaPipelineApp(),
+    );
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Prepare top memory write draft'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Approve memory write draft'), findsOneWidget);
+    await tester.enterText(
+      find.byType(TextField).first,
+      memoryWriteApprovalPhrase,
+    );
+    await tester.tap(find.text('Approve'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pending memory approvals'), findsOneWidget);
+    expect(
+      find.text('1 local draft waiting for the future remote write step.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('(pending)'), findsOneWidget);
   });
 }
 

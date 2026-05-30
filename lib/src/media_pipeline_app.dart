@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'immich_connection.dart';
 import 'memory_curator.dart';
+import 'memory_write_flow.dart';
 import 'immich_phone_checklist_store.dart';
 import 'pipeline_models.dart';
 import 'pipeline_runner.dart';
@@ -1131,6 +1132,7 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
   late String _previewSourceLabel;
   String? _message;
   late List<MemoryPreviewAsset> _assets;
+  final List<MemoryWriteDraft> _pendingDrafts = [];
   bool _loadingLiveAssets = false;
 
   @override
@@ -1198,6 +1200,23 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
     }
   }
 
+  Future<void> _prepareMemoryWriteDraft(
+    MemoryPreviewCandidate candidate,
+  ) async {
+    final draft = await showDialog<MemoryWriteDraft?>(
+      context: context,
+      builder: (context) =>
+          _MemoryWriteApprovalDialog(candidate: candidate),
+    );
+    if (draft == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _pendingDrafts.insert(0, draft);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
@@ -1262,6 +1281,16 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
                 _message!.trim(),
             ],
           ),
+          if (_displayState == MemoryPreviewDisplayState.sampleReady &&
+              preview != null &&
+              preview.candidates.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () => _prepareMemoryWriteDraft(preview.candidates.first),
+              icon: const Icon(Icons.edit_note),
+              label: const Text('Prepare top memory write draft'),
+            ),
+          ],
           const SizedBox(height: 16),
           if (_displayState == MemoryPreviewDisplayState.loading)
             const _MemoryPreviewPlaceholder(
@@ -1285,10 +1314,15 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
                   'Check the read-only adapter contract and retry the connection.',
             )
           else ...[
+            _MemoryWriteDraftPanel(drafts: _pendingDrafts),
+            const SizedBox(height: 12),
             for (final candidate in preview!.candidates)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
-                child: _MemoryPreviewCandidateCard(candidate: candidate),
+                child: _MemoryPreviewCandidateCard(
+                  candidate: candidate,
+                  onPrepareWrite: () => _prepareMemoryWriteDraft(candidate),
+                ),
               ),
             _MemoryPreviewExclusionPanel(exclusions: preview.exclusions),
           ],
@@ -1320,9 +1354,13 @@ class _MemoryPreviewPlaceholder extends StatelessWidget {
 }
 
 class _MemoryPreviewCandidateCard extends StatelessWidget {
-  const _MemoryPreviewCandidateCard({required this.candidate});
+  const _MemoryPreviewCandidateCard({
+    required this.candidate,
+    required this.onPrepareWrite,
+  });
 
   final MemoryPreviewCandidate candidate;
+  final VoidCallback onPrepareWrite;
 
   @override
   Widget build(BuildContext context) {
@@ -1355,9 +1393,126 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 4),
                 child: Text('- $reason'),
               ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: onPrepareWrite,
+                icon: const Icon(Icons.edit_note),
+                label: const Text('Prepare memory write draft'),
+              ),
+            ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _MemoryWriteDraftPanel extends StatelessWidget {
+  const _MemoryWriteDraftPanel({required this.drafts});
+
+  final List<MemoryWriteDraft> drafts;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: _StatusPanel(
+        icon: Icons.pending_actions,
+        title: 'Pending memory approvals',
+        lines: [
+          if (drafts.isEmpty)
+            'No memory write drafts have been approved yet.'
+          else
+            '${drafts.length} local draft${drafts.length == 1 ? '' : 's'} waiting for the future remote write step.',
+          if (drafts.isNotEmpty)
+            for (final draft in drafts) '• ${draft.candidateTitle} (${draft.state.name})',
+        ],
+      ),
+    );
+  }
+}
+
+class _MemoryWriteApprovalDialog extends StatefulWidget {
+  const _MemoryWriteApprovalDialog({required this.candidate});
+
+  final MemoryPreviewCandidate candidate;
+
+  @override
+  State<_MemoryWriteApprovalDialog> createState() =>
+      _MemoryWriteApprovalDialogState();
+}
+
+class _MemoryWriteApprovalDialogState extends State<_MemoryWriteApprovalDialog> {
+  final TextEditingController _approvalController = TextEditingController();
+  String? _errorText;
+
+  @override
+  void dispose() {
+    _approvalController.dispose();
+    super.dispose();
+  }
+
+  void _approve() {
+    final typed = _approvalController.text.trim();
+    if (typed != memoryWriteApprovalPhrase) {
+      setState(() {
+        _errorText = 'Type $memoryWriteApprovalPhrase to continue.';
+      });
+      return;
+    }
+
+    Navigator.of(context).pop(
+      createPendingMemoryWriteDraft(
+        candidate: widget.candidate,
+        createdAt: DateTime.now(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('Approve memory write draft'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This creates a local pending record only. The remote write step is not wired yet.',
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 12),
+            Text('Candidate: ${widget.candidate.title}'),
+            Text('Assets: ${widget.candidate.assetIds.join(', ')}'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _approvalController,
+              autofocus: true,
+              decoration: InputDecoration(
+                labelText: 'Type approval phrase',
+                hintText: memoryWriteApprovalPhrase,
+                errorText: _errorText,
+              ),
+              onSubmitted: (_) => _approve(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _approve,
+          child: const Text('Approve'),
+        ),
+      ],
     );
   }
 }

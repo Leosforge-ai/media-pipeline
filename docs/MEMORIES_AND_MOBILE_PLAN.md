@@ -84,6 +84,7 @@ Verification:
 
 ```bash
 flutter test test/widget_test.dart --plain-name "memory preview"
+flutter test test/widget_test.dart --plain-name "memory write draft"
 ```
 
 Expected outcome:
@@ -91,6 +92,8 @@ Expected outcome:
 - The widget test covers the sample-ready, loading, empty, and error preview
   states.
 - The preview panel still renders sample candidates in ready mode.
+- The preview panel also exposes a local-only memory write approval draft queue
+  for the future write path.
 
 ## Phase 5: Create Memories In Immich
 
@@ -100,9 +103,11 @@ Expected outcome:
 - Record created memory IDs locally for later update/removal.
 - Avoid modifying external media files; Immich metadata lives in the Immich database unless the user explicitly configures sidecars.
 
-Status: design in progress. The write path is intentionally split into a separate
-documented approval flow in [`docs/MEMORY_WRITE_PATH_DESIGN.md`](MEMORY_WRITE_PATH_DESIGN.md).
-The implementation remains out of scope until that design is reviewed.
+Status: implementation in progress. The app now has a local memory-write
+approval draft queue in the Memories panel, but it still does not send create or
+update requests to Immich. The remote write path remains intentionally split
+into [`docs/MEMORY_WRITE_PATH_DESIGN.md`](MEMORY_WRITE_PATH_DESIGN.md) so the
+approval flow stays reviewed before any network write is added.
 
 ## Phase 6: Notifications
 
