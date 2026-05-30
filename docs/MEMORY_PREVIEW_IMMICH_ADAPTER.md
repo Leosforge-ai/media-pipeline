@@ -60,3 +60,33 @@ approves memories or assets.
 - The preview scorer still runs locally on the loaded metadata.
 - Missing optional metadata does not block the preview.
 - No Immich writes are performed by the adapter.
+
+## Verification
+
+Run these checks against a private Immich server and API key before enabling
+the adapter in normal app use:
+
+```bash
+# 1) Connectivity check with no key
+curl -fsS "$IMMICH_URL/api/server/ping"
+
+# 2) Read-only authenticated server info
+curl -fsS -H "x-api-key: $IMMICH_API_KEY" "$IMMICH_URL/api/server/about" >/tmp/immich_about.json
+
+# 3) Read-only asset listing
+curl -fsS -H "x-api-key: $IMMICH_API_KEY" "$IMMICH_URL/api/assets?withDeleted=false" >/tmp/immich_assets_page1.json
+```
+
+Expected results:
+
+- The ping endpoint succeeds without a key.
+- The authenticated read-only endpoints succeed with a valid key.
+- The adapter only reads data and does not emit any create, update, delete, or
+  approve calls.
+- The preview still renders when optional metadata is missing.
+
+Where to inspect results:
+
+- The saved JSON files in `/tmp` for manual inspection.
+- The app log output for read-only fetch errors or missing optional metadata.
+- The preview panel for rendered candidates and exclusions.
