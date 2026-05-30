@@ -129,6 +129,11 @@ flutter test test/widget_test.dart --plain-name "memory write draft"
 - Prefer private-network delivery. For outside-home access, document VPN/Tailscale/WireGuard or a trusted notification provider.
 - Include an Immich deep link or server link when available.
 
+Status: design in progress. The notification boundary is documented in
+[`docs/NOTIFICATION_DELIVERY_DESIGN.md`](NOTIFICATION_DELIVERY_DESIGN.md), but
+the app does not yet send notifications. Provider wiring remains out of scope
+until that design is reviewed.
+
 ## Phase 7: Personal Ranking Model
 
 - Start with explainable rules, not a trained model.
