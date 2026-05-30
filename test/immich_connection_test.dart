@@ -336,5 +336,76 @@ void main() {
       expect(report.usageBytes, isNull);
       expect(report.message, contains('statistics returned HTTP 503'));
     });
+
+    test('loads memory preview assets from read-only search metadata', () async {
+      final calls = <Uri>[];
+      final headersByPath = <String, Map<String, String>>{};
+      final bodies = <String>[];
+      final client = ImmichApiClient(
+        post: (uri, headers, body) async {
+          calls.add(uri);
+          headersByPath[uri.path] = headers;
+          bodies.add(body);
+          return ImmichHttpResponse(
+            statusCode: 200,
+            body: jsonEncode({
+              'assets': [
+                {
+                  'id': 'asset-1',
+                  'localDateTime': '2024-05-27T12:00:00Z',
+                  'isFavorite': true,
+                  'albums': [
+                    {'name': 'Lisbon Week'},
+                  ],
+                  'people': [
+                    {'person': {'name': 'Leo'}},
+                  ],
+                  'exifInfo': {'city': 'Lisbon'},
+                },
+                {
+                  'id': 'asset-2',
+                  'fileCreatedAt': '2024-05-29T12:00:00Z',
+                  'duplicateId': 'dup-1',
+                  'people': [
+                    {'name': 'Ana'},
+                  ],
+                  'exifInfo': {'city': 'Lisbon'},
+                },
+              ],
+            }),
+          );
+        },
+      );
+
+      final assets = await client.loadMemoryPreviewAssets(
+        const ImmichConnectionSettings(
+          serverUrl: 'http://immich.local:2283',
+          apiKey: 'secret',
+        ),
+      );
+
+      expect(calls.map((uri) => uri.path), ['/api/search/metadata']);
+      expect(headersByPath['/api/search/metadata'], {
+        'x-api-key': 'secret',
+        'content-type': 'application/json',
+      });
+      expect(bodies, hasLength(1));
+      expect(jsonDecode(bodies.single), {
+        'size': 100,
+        'withDeleted': false,
+        'withExif': true,
+        'withPeople': true,
+      });
+      expect(assets, hasLength(2));
+      expect(assets.first.id, 'asset-1');
+      expect(assets.first.isFavorite, isTrue);
+      expect(assets.first.albumNames, ['Lisbon Week']);
+      expect(assets.first.peopleNames, ['Leo']);
+      expect(assets.first.city, 'Lisbon');
+      expect(assets.first.isNearDuplicate, isFalse);
+      expect(assets.last.id, 'asset-2');
+      expect(assets.last.peopleNames, ['Ana']);
+      expect(assets.last.isNearDuplicate, isTrue);
+    });
   });
 }

@@ -61,7 +61,8 @@ This checklist defines what must be true before the Immich work is treated as pr
 
 - API keys stay in memory only until a proper credential-store design is approved.
 - Memory-curator work remains preview-only.
-- The read-only Immich adapter is documented but not yet wired to live assets.
+- The read-only Immich adapter is wired to a manual load button, but it still
+  only loads preview assets on demand.
 - Notifications are not part of the core beta scope.
 - Public packaging, signing, and distribution are still deferred.
 
@@ -73,5 +74,4 @@ This build should not be described as public or generally available until all of
 - release packaging and signing;
 - upgrade and migration coverage for local files;
 - broader multi-platform smoke testing;
-- real-asset memory preview adapter wiring;
 - a privacy review for any future memory write path.

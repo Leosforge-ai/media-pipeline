@@ -73,11 +73,12 @@ desktop-app preview panel that renders sample read-only candidates for prior
 year, album, and location groupings. The preview still does not call Immich or
 write memories.
 
-The next implementation step is a read-only Immich adapter documented in
+The preview panel can now load live read-only assets from Immich on demand via
+the adapter documented in
 [`docs/MEMORY_PREVIEW_IMMICH_ADAPTER.md`](MEMORY_PREVIEW_IMMICH_ADAPTER.md).
-The desktop preview panel also has explicit ready, loading, empty, and error
-states so the UI can move from sample data to real Immich assets without
-changing the preview contract.
+The panel still defaults to sample data and keeps explicit ready, loading,
+empty, and error states so the UI can move between sample and live assets
+without changing the preview contract.
 
 Verification:
 

@@ -375,8 +375,11 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                 ),
                 _AppMode.help => const _HelpDetail(),
                 _AppMode.memories => _MemoryPreviewDetail(
-                  displayState: widget.memoryPreviewState,
-                  message: widget.memoryPreviewMessage,
+                  immichClient: _immichClient,
+                  serverUrlController: _immichUrlController,
+                  apiKeyController: _immichApiKeyController,
+                  initialDisplayState: widget.memoryPreviewState,
+                  initialMessage: widget.memoryPreviewMessage,
                 ),
               },
             ),
@@ -1068,7 +1071,7 @@ class _HelpDetail extends StatelessWidget {
             icon: Icons.auto_awesome,
             title: 'Memories Direction',
             bullets: [
-              'Future app work should connect to the private Immich API.',
+              'The Memory Curator Preview can load live read-only assets from Immich on demand.',
               'Start with explainable memory scoring before training a personal model.',
               'Preview memory candidates before creating anything in Immich.',
             ],
@@ -1102,29 +1105,108 @@ class _HelpDetail extends StatelessWidget {
   }
 }
 
-class _MemoryPreviewDetail extends StatelessWidget {
+class _MemoryPreviewDetail extends StatefulWidget {
   const _MemoryPreviewDetail({
-    required this.displayState,
-    this.message,
+    required this.immichClient,
+    required this.serverUrlController,
+    required this.apiKeyController,
+    required this.initialDisplayState,
+    this.initialMessage,
   });
 
-  final MemoryPreviewDisplayState displayState;
-  final String? message;
+  final ImmichApiClient immichClient;
+  final TextEditingController serverUrlController;
+  final TextEditingController apiKeyController;
+  final MemoryPreviewDisplayState initialDisplayState;
+  final String? initialMessage;
+
+  @override
+  State<_MemoryPreviewDetail> createState() => _MemoryPreviewDetailState();
+}
+
+class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
+  static final DateTime _referenceDate = DateTime(2026, 5, 29);
+
+  late MemoryPreviewDisplayState _displayState;
+  late String _previewSourceLabel;
+  String? _message;
+  late List<MemoryPreviewAsset> _assets;
+  bool _loadingLiveAssets = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _displayState = widget.initialDisplayState;
+    _previewSourceLabel = 'sample data';
+    _message = widget.initialMessage?.trim();
+    _assets = widget.initialDisplayState == MemoryPreviewDisplayState.sampleReady
+        ? buildMemoryPreviewSampleAssets()
+        : const [];
+  }
+
+  Future<void> _loadLivePreviewAssets() async {
+    if (_loadingLiveAssets) {
+      return;
+    }
+
+    setState(() {
+      _loadingLiveAssets = true;
+      _displayState = MemoryPreviewDisplayState.loading;
+      _message = null;
+    });
+
+    try {
+      final assets = await widget.immichClient.loadMemoryPreviewAssets(
+        ImmichConnectionSettings(
+          serverUrl: widget.serverUrlController.text,
+          apiKey: widget.apiKeyController.text,
+        ),
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loadingLiveAssets = false;
+        _previewSourceLabel = 'live Immich assets';
+        _assets = assets;
+        if (assets.isEmpty) {
+          _displayState = MemoryPreviewDisplayState.empty;
+          _message = 'The read-only adapter returned no assets for the preview.';
+        } else {
+          _displayState = MemoryPreviewDisplayState.sampleReady;
+          _message = 'Loaded ${assets.length} live assets from Immich.';
+        }
+      });
+    } on ImmichConnectionException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loadingLiveAssets = false;
+        _displayState = MemoryPreviewDisplayState.error;
+        _message = error.message;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loadingLiveAssets = false;
+        _displayState = MemoryPreviewDisplayState.error;
+        _message = 'Immich preview load failed: $error';
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    final referenceDate = DateTime(2026, 5, 29);
-    final trimmedMessage = message?.trim();
-    final preview = switch (displayState) {
-      MemoryPreviewDisplayState.sampleReady => buildMemoryPreviewCandidates(
-        referenceDate: referenceDate,
-        assets: buildMemoryPreviewSampleAssets(),
-      ),
-      MemoryPreviewDisplayState.loading ||
-      MemoryPreviewDisplayState.empty ||
-      MemoryPreviewDisplayState.error => null,
-    };
+    final preview = _displayState == MemoryPreviewDisplayState.loading
+        ? null
+        : buildMemoryPreviewCandidates(
+            referenceDate: _referenceDate,
+            assets: _assets,
+          );
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -1132,12 +1214,29 @@ class _MemoryPreviewDetail extends StatelessWidget {
         children: [
           Text('Memory Curator Preview', style: textTheme.headlineSmall),
           const SizedBox(height: 8),
-          const Text(
-            'Preview-only mode. This does not call Immich, create memories, or store feedback.',
+          const Text('Preview-only mode.'),
+          const SizedBox(height: 4),
+          const Text('This does not write to Immich or store feedback.'),
+          const SizedBox(height: 12),
+          Text(
+            'Preview source: $_previewSourceLabel',
+            style: textTheme.bodySmall,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 12),
+          TextButton.icon(
+            onPressed: _loadingLiveAssets ? null : _loadLivePreviewAssets,
+            icon: Icon(
+              _loadingLiveAssets ? Icons.hourglass_bottom : Icons.cloud_download,
+            ),
+            label: Text(
+              _previewSourceLabel == 'sample data'
+                  ? 'Load from Immich'
+                  : 'Reload from Immich',
+            ),
+          ),
+          const SizedBox(height: 8),
           _StatusPanel(
-            icon: switch (displayState) {
+            icon: switch (_displayState) {
               MemoryPreviewDisplayState.sampleReady => Icons.visibility,
               MemoryPreviewDisplayState.loading => Icons.hourglass_bottom,
               MemoryPreviewDisplayState.empty => Icons.inbox,
@@ -1145,38 +1244,40 @@ class _MemoryPreviewDetail extends StatelessWidget {
             },
             title: 'Preview status',
             lines: [
-              'Preview-only mode.',
-              switch (displayState) {
-                MemoryPreviewDisplayState.sampleReady => 'Rules-based scoring only.',
-                MemoryPreviewDisplayState.loading => 'Loading real Immich assets...',
-                MemoryPreviewDisplayState.empty => 'No preview assets available yet.',
+              switch (_displayState) {
+                MemoryPreviewDisplayState.sampleReady =>
+                  'Rules-based scoring only.',
+                MemoryPreviewDisplayState.loading =>
+                  'Loading real Immich assets...',
+                MemoryPreviewDisplayState.empty =>
+                  'No preview assets available yet.',
                 MemoryPreviewDisplayState.error =>
                   'Unable to load preview assets.',
               },
-              if (displayState == MemoryPreviewDisplayState.sampleReady)
+              if (_displayState == MemoryPreviewDisplayState.sampleReady)
                 'Reference date: 2026-05-29',
-              if (displayState == MemoryPreviewDisplayState.sampleReady)
-                '${preview!.candidates.length} candidates, ${preview.exclusions.length} excluded assets in sample data.',
-              if (trimmedMessage != null && trimmedMessage.isNotEmpty)
-                trimmedMessage,
+              if (_displayState == MemoryPreviewDisplayState.sampleReady)
+                '${preview!.candidates.length} candidates, ${preview.exclusions.length} excluded assets in $_previewSourceLabel.',
+              if (_message != null && _message!.trim().isNotEmpty)
+                _message!.trim(),
             ],
           ),
           const SizedBox(height: 16),
-          if (displayState == MemoryPreviewDisplayState.loading)
+          if (_displayState == MemoryPreviewDisplayState.loading)
             const _MemoryPreviewPlaceholder(
               icon: Icons.hourglass_bottom,
               title: 'Loading preview',
               subtitle:
                   'Fetching read-only metadata from Immich before scoring locally.',
             )
-          else if (displayState == MemoryPreviewDisplayState.empty)
+          else if (_displayState == MemoryPreviewDisplayState.empty)
             const _MemoryPreviewPlaceholder(
               icon: Icons.inbox,
               title: 'No preview candidates yet',
               subtitle:
                   'Connect a private Immich server with readable assets to populate this preview.',
             )
-          else if (displayState == MemoryPreviewDisplayState.error)
+          else if (_displayState == MemoryPreviewDisplayState.error)
             const _MemoryPreviewPlaceholder(
               icon: Icons.error_outline,
               title: 'Preview unavailable',

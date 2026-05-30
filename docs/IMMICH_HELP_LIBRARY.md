@@ -117,7 +117,8 @@ Run the dry-run before or between Immich scans. After confirm mode, restart Immi
 
 ## Memories
 
-Immich can show memories from server-side assets. The planned app memory-curator feature will build on this by:
+Immich can show memories from server-side assets. The app's Memory Curator
+Preview can now load live read-only assets on demand and build on this by:
 
 - reading assets from the private Immich API;
 - creating explainable memory candidates;

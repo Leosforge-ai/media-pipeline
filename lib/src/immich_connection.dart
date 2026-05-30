@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'memory_curator.dart';
+
 class ImmichConnectionSettings {
   const ImmichConnectionSettings({
     required this.serverUrl,
@@ -75,11 +77,20 @@ class ImmichHttpResponse {
 
 typedef ImmichHttpGet =
     Future<ImmichHttpResponse> Function(Uri uri, Map<String, String> headers);
+typedef ImmichHttpPost =
+    Future<ImmichHttpResponse> Function(
+      Uri uri,
+      Map<String, String> headers,
+      String body,
+    );
 
 class ImmichApiClient {
-  ImmichApiClient({ImmichHttpGet? get}) : _get = get ?? _defaultGet;
+  ImmichApiClient({ImmichHttpGet? get, ImmichHttpPost? post})
+    : _get = get ?? _defaultGet,
+      _post = post ?? _defaultPost;
 
   final ImmichHttpGet _get;
+  final ImmichHttpPost _post;
 
   Future<ImmichConnectionReport> check(
     ImmichConnectionSettings settings,
@@ -203,6 +214,69 @@ class ImmichApiClient {
     );
   }
 
+  Future<List<MemoryPreviewAsset>> loadMemoryPreviewAssets(
+    ImmichConnectionSettings settings, {
+    int size = 100,
+  }) async {
+    final apiBase = _resolveApiBase(settings.serverUrl);
+    final apiKey = settings.apiKey.trim();
+    if (apiKey.isEmpty) {
+      throw const ImmichConnectionException(
+        ImmichConnectionIssue.invalidApiKey,
+        'Add an Immich API key to load live memory preview assets.',
+      );
+    }
+
+    final response = await _post(
+      apiBase.resolve('search/metadata'),
+      {
+        'x-api-key': apiKey,
+        HttpHeaders.contentTypeHeader: 'application/json',
+      },
+      jsonEncode({
+        'size': size,
+        'withDeleted': false,
+        'withExif': true,
+        'withPeople': true,
+      }),
+    );
+    if (response.statusCode == HttpStatus.unauthorized) {
+      throw const ImmichConnectionException(
+        ImmichConnectionIssue.invalidApiKey,
+        'The Immich API key was rejected while loading memory preview assets.',
+      );
+    }
+    if (response.statusCode == HttpStatus.forbidden) {
+      throw const ImmichConnectionException(
+        ImmichConnectionIssue.missingPermission,
+        'The Immich API key can reach Immich, but it lacks permission to read assets for the preview.',
+      );
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ImmichConnectionException(
+        ImmichConnectionIssue.unexpectedResponse,
+        'Immich returned HTTP ${response.statusCode} while loading preview assets.',
+      );
+    }
+
+    final decoded = _decodeObject(response.body, context: 'search/metadata');
+    final assetsJson = decoded['assets'];
+    if (assetsJson is! List) {
+      throw const ImmichConnectionException(
+        ImmichConnectionIssue.unexpectedResponse,
+        'Immich returned an unexpected payload for search/metadata.',
+      );
+    }
+
+    return [
+      for (final item in assetsJson)
+        if (item is Map)
+          _memoryPreviewAssetFromJson(
+            item.map((key, value) => MapEntry('$key', value)),
+          ),
+    ];
+  }
+
   Future<ImmichHttpResponse> _request(
     Uri uri,
     Map<String, String> headers,
@@ -241,6 +315,45 @@ class ImmichApiClient {
           .decodeStream(response)
           .timeout(const Duration(seconds: 12));
       return ImmichHttpResponse(statusCode: response.statusCode, body: body);
+    } on TimeoutException {
+      throw const ImmichConnectionException(
+        ImmichConnectionIssue.serverUnavailable,
+        'Immich server timed out. Check the URL, your network, and any VPN or Docker port forwarding.',
+      );
+    } on SocketException catch (error) {
+      throw ImmichConnectionException(
+        ImmichConnectionIssue.serverUnavailable,
+        'Immich server is not reachable: ${error.message}',
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static Future<ImmichHttpResponse> _defaultPost(
+    Uri uri,
+    Map<String, String> headers,
+    String body,
+  ) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client
+          .postUrl(uri)
+          .timeout(const Duration(seconds: 8));
+      for (final header in headers.entries) {
+        request.headers.set(header.key, header.value);
+      }
+      request.write(body);
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      final responseBody = await utf8
+          .decodeStream(response)
+          .timeout(const Duration(seconds: 12));
+      return ImmichHttpResponse(
+        statusCode: response.statusCode,
+        body: responseBody,
+      );
     } on TimeoutException {
       throw const ImmichConnectionException(
         ImmichConnectionIssue.serverUnavailable,
@@ -328,6 +441,86 @@ int? _intValueFromKeys(
     if (value != null) {
       return value;
     }
+  }
+  return null;
+}
+
+MemoryPreviewAsset _memoryPreviewAssetFromJson(Map<String, Object?> json) {
+  final exifInfo = _mapValue(json['exifInfo']);
+  final assetPeople = _listValue(json['people'])
+      .expand((entry) {
+        final map = _mapValue(entry);
+        final names = <String>[];
+        final directName = _stringValue(map?['name']);
+        if (directName != null && directName.trim().isNotEmpty) {
+          names.add(directName.trim());
+        }
+        final nestedName = _stringValue(_mapValue(map?['person'])?['name']);
+        if (nestedName != null && nestedName.trim().isNotEmpty) {
+          names.add(nestedName.trim());
+        }
+        return names;
+      })
+      .toSet()
+      .toList();
+  final albumNames = _listValue(json['albums'])
+      .expand((entry) {
+        final map = _mapValue(entry);
+        return [
+          _stringValue(map?['name']),
+          _stringValue(map?['albumName']),
+          _stringValue(map?['title']),
+        ].whereType<String>().map((value) => value.trim()).where(
+          (value) => value.isNotEmpty,
+        );
+      })
+      .toSet()
+      .toList();
+
+  return MemoryPreviewAsset(
+    id: _stringValue(json['id']) ?? 'unknown',
+    takenAt:
+        _dateTimeValue(json['localDateTime']) ??
+        _dateTimeValue(json['fileCreatedAt']) ??
+        _dateTimeValue(json['createdAt']) ??
+        DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+    isFavorite: json['isFavorite'] == true,
+    albumNames: albumNames,
+    peopleNames: assetPeople,
+    city:
+        _stringValue(exifInfo?['city']) ??
+        _stringValue(json['city']) ??
+        _stringValue(exifInfo?['state']),
+    isNearDuplicate: _stringValue(json['duplicateId']) != null,
+  );
+}
+
+Map<String, Object?>? _mapValue(Object? value) {
+  if (value is Map<String, Object?>) {
+    return value;
+  }
+  if (value is Map) {
+    return value.map((key, value) => MapEntry('$key', value));
+  }
+  return null;
+}
+
+List<Object?> _listValue(Object? value) {
+  if (value is List<Object?>) {
+    return value;
+  }
+  if (value is List) {
+    return value.cast<Object?>();
+  }
+  return const [];
+}
+
+DateTime? _dateTimeValue(Object? value) {
+  if (value is DateTime) {
+    return value;
+  }
+  if (value is String) {
+    return DateTime.tryParse(value);
   }
   return null;
 }

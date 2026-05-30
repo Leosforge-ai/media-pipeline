@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_pipeline_app/src/immich_phone_checklist_store.dart';
 import 'package:media_pipeline_app/src/immich_connection.dart';
 import 'package:media_pipeline_app/src/media_pipeline_app.dart';
+import 'package:media_pipeline_app/src/memory_curator.dart';
 
 void main() {
   testWidgets('renders the desktop shell', (WidgetTester tester) async {
@@ -191,6 +192,30 @@ void main() {
     expect(find.text('receipt-1: receipt'), findsOneWidget);
   });
 
+  testWidgets('loads live memory preview assets from Immich', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MediaPipelineApp(
+        immichClient: _FakeImmichClient.livePreview(),
+      ),
+    );
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Preview source: sample data'), findsOneWidget);
+    expect(find.text('Load from Immich'), findsOneWidget);
+
+    await tester.tap(find.text('Load from Immich'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Preview source: live Immich assets'), findsOneWidget);
+    expect(find.text('Loaded 3 live assets from Immich.'), findsOneWidget);
+    expect(find.text('This week in 2024'), findsOneWidget);
+    expect(find.text('Reload from Immich'), findsOneWidget);
+  });
+
   testWidgets('shows memory curator loading state', (
     WidgetTester tester,
   ) async {
@@ -262,6 +287,11 @@ class _FakeImmichClient extends ImmichApiClient {
       issue = null,
       message = null;
 
+  _FakeImmichClient.livePreview()
+    : _mode = _FakeMode.livePreview,
+      issue = null,
+      message = null;
+
   _FakeImmichClient.failure(this.issue, this.message)
     : _mode = _FakeMode.failure;
 
@@ -292,15 +322,56 @@ class _FakeImmichClient extends ImmichApiClient {
         message:
             'Server info verified. Statistics were not available with this key.',
       ),
+      _FakeMode.livePreview => const ImmichConnectionReport(
+        serverUrl: 'http://localhost:2283/api/',
+        pingOk: true,
+        authenticated: true,
+        version: '1.140.0',
+        message: 'Read-only Immich API check completed.',
+      ),
       _FakeMode.failure => throw ImmichConnectionException(
         issue ?? ImmichConnectionIssue.unexpectedResponse,
         message ?? 'boom',
       ),
     };
   }
+
+  @override
+  Future<List<MemoryPreviewAsset>> loadMemoryPreviewAssets(
+    ImmichConnectionSettings settings, {
+    int size = 100,
+  }) async {
+    if (_mode != _FakeMode.livePreview) {
+      return super.loadMemoryPreviewAssets(settings, size: size);
+    }
+
+    return [
+      MemoryPreviewAsset(
+        id: 'live-1',
+        takenAt: DateTime(2024, 5, 27),
+        isFavorite: true,
+        albumNames: ['Lisbon Week'],
+        peopleNames: ['Leo'],
+        city: 'Lisbon',
+      ),
+      MemoryPreviewAsset(
+        id: 'live-2',
+        takenAt: DateTime(2024, 5, 29),
+        albumNames: ['Lisbon Week'],
+        peopleNames: ['Ana'],
+        city: 'Lisbon',
+      ),
+      MemoryPreviewAsset(
+        id: 'live-3',
+        takenAt: DateTime(2024, 5, 30),
+        albumNames: ['Lisbon Week'],
+        city: 'Lisbon',
+      ),
+    ];
+  }
 }
 
-enum _FakeMode { success, missingStatistics, failure }
+enum _FakeMode { success, missingStatistics, livePreview, failure }
 
 class _FakeChecklistStore extends ImmichChecklistStore {
   _FakeChecklistStore() : super(baseDirectory: Directory('.'));
