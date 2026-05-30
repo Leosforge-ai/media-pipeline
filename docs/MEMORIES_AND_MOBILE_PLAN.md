@@ -100,6 +100,10 @@ Expected outcome:
 - Record created memory IDs locally for later update/removal.
 - Avoid modifying external media files; Immich metadata lives in the Immich database unless the user explicitly configures sidecars.
 
+Status: design in progress. The write path is intentionally split into a separate
+documented approval flow in [`docs/MEMORY_WRITE_PATH_DESIGN.md`](MEMORY_WRITE_PATH_DESIGN.md).
+The implementation remains out of scope until that design is reviewed.
+
 ## Phase 6: Notifications
 
 - Add optional notification providers:
