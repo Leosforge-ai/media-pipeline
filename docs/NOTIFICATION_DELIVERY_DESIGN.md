@@ -87,6 +87,6 @@ shfmt -d scripts/*.sh config/*.sh
 ## Non-Goals
 
 - No notification provider wiring yet.
-- No notification retry queue yet.
-- No notification templates for ranking feedback.
+- No retry queue for notification delivery yet.
+- No ranking-feedback notification templates yet.
 - No public push-provider configuration in the app settings.
