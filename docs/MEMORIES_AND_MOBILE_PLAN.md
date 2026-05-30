@@ -52,6 +52,8 @@ Status: in progress. The desktop app now has an **Immich** section that keeps th
 Status: in progress. The desktop app now includes a phone backup checklist and a
 compact troubleshooting section for stalled uploads, Android battery
 optimization, iPhone Low Power Mode, and private server URL mistakes.
+The private-beta checklist also reflects the current feature set and keeps the
+read-only memory-adapter work explicitly out of the public-release criteria.
 
 ## Phase 4: Memory Curator Preview
 
