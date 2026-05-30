@@ -16,6 +16,10 @@ The first implementation step is a local rules engine in
 returns preview candidates plus exclusion reasons. It does not call Immich, write
 memories, upload files, or persist scoring data.
 
+The next implementation step is a read-only Immich adapter that can load the
+minimum asset metadata needed by the rules engine. The adapter design is
+documented in [`docs/MEMORY_PREVIEW_IMMICH_ADAPTER.md`](MEMORY_PREVIEW_IMMICH_ADAPTER.md).
+
 ## Candidate Sources
 
 - This day or week in prior years.
@@ -44,6 +48,8 @@ Each preview candidate should show:
 ## Privacy And Safety Constraints
 
 - Do not write memories to Immich in this phase.
+- Do not create, update, or delete Immich assets or memories from the preview
+  adapter.
 - Do not upload media or sidecar files.
 - Do not enable notifications as part of the core preview.
 - Keep all candidate scoring local unless the user explicitly exports it.
