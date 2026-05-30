@@ -364,9 +364,20 @@ void main() {
     await tester.tap(find.text('Memories'));
     await tester.pumpAndSettle();
 
+    final feedbackButton = tester.widget<OutlinedButton>(
+      find.byKey(const ValueKey<String>('feedback-This week in 2024-favorited')),
+    );
+    expect(feedbackButton.onPressed, isNull);
+    expect(find.text('Local ranking feedback'), findsOneWidget);
+    expect(find.text('Favorited: This week in 2024'), findsNothing);
+
     await tester.tap(find.text('Collect local ranking feedback'));
     await tester.pumpAndSettle();
 
+    final enabledFeedbackButton = tester.widget<OutlinedButton>(
+      find.byKey(const ValueKey<String>('feedback-This week in 2024-favorited')),
+    );
+    expect(enabledFeedbackButton.onPressed, isNotNull);
     await tester.tap(
       find.byKey(const ValueKey<String>('feedback-This week in 2024-favorited')),
     );

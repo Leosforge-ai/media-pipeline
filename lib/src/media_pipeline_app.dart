@@ -1239,7 +1239,7 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
         0,
         MemoryFeedbackEvent(
           candidateTitle: candidate.title,
-          assetIds: candidate.assetIds,
+          assetIds: List.unmodifiable(candidate.assetIds),
           type: type,
           recordedAt: DateTime.now(),
         ),
