@@ -146,10 +146,23 @@ until that design is reviewed.
 - Train or tune a lightweight local ranker only after enough feedback exists.
 - Keep all feedback and scoring data local unless the user explicitly exports it.
 
-Status: design in progress. The Phase 7 boundary is documented in
-[`docs/RANKING_FEEDBACK_DESIGN.md`](RANKING_FEEDBACK_DESIGN.md), but the app
-does not yet collect or score ranking feedback. The current work remains
-read-only and local.
+Status: in progress. The app now includes an opt-in local feedback scaffold in
+the Memories panel, and the Phase 7 boundary is documented in
+[`docs/RANKING_FEEDBACK_DESIGN.md`](RANKING_FEEDBACK_DESIGN.md). The current
+work still stays local and does not yet change ranking scores.
+
+Phase 7 verification:
+
+```bash
+flutter test test/memory_feedback_test.dart
+flutter test test/widget_test.dart --plain-name "feedback"
+```
+
+Expected outcome:
+
+- Feedback events are recorded only after explicit opt-in.
+- Feedback stays local-only and is not exported or sent to external services.
+- Preview ranking remains rules-first with no trained-model score changes.
 
 ## App Help Library Sources
 

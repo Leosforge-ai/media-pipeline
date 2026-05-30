@@ -168,6 +168,11 @@ void main() {
   testWidgets('shows memory curator preview candidates', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(const MediaPipelineApp());
 
     await tester.tap(find.text('Memories'));
@@ -176,29 +181,9 @@ void main() {
     expect(find.text('Memory Curator Preview'), findsOneWidget);
     expect(find.text('Preview-only mode.'), findsOneWidget);
     expect(find.text('Preview status'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('This week in 2024'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
     expect(find.text('This week in 2024'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('Album: Lisbon Week'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
     expect(find.text('Album: Lisbon Week'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('Place: Lisbon'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
     expect(find.text('Place: Lisbon'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('Excluded assets'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
     expect(find.text('Excluded assets'), findsOneWidget);
     expect(find.text('receipt-1: receipt'), findsOneWidget);
   });
@@ -206,6 +191,11 @@ void main() {
   testWidgets('loads live memory preview assets from Immich', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(
       MediaPipelineApp(
         immichClient: _FakeImmichClient.livePreview(),
@@ -223,11 +213,6 @@ void main() {
 
     expect(find.text('Preview source: live Immich assets'), findsOneWidget);
     expect(find.text('Loaded 3 live assets from Immich.'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('This week in 2024'),
-      200,
-      scrollable: find.byType(Scrollable).last,
-    );
     expect(find.text('This week in 2024'), findsOneWidget);
     expect(find.text('Reload from Immich'), findsOneWidget);
   });
@@ -235,6 +220,11 @@ void main() {
   testWidgets('shows memory curator loading state', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(
       const MediaPipelineApp(
         memoryPreviewState: MemoryPreviewDisplayState.loading,
@@ -252,6 +242,11 @@ void main() {
   testWidgets('shows memory curator empty state', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(
       const MediaPipelineApp(
         memoryPreviewState: MemoryPreviewDisplayState.empty,
@@ -273,6 +268,11 @@ void main() {
   testWidgets('shows memory curator error state', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(
       const MediaPipelineApp(
         memoryPreviewState: MemoryPreviewDisplayState.error,
@@ -294,6 +294,11 @@ void main() {
   testWidgets('queues a local memory write draft after approval', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(
       const MediaPipelineApp(),
     );
@@ -323,6 +328,11 @@ void main() {
   testWidgets('rejects a memory write draft with the wrong approval phrase', (
     WidgetTester tester,
   ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     await tester.pumpWidget(const MediaPipelineApp());
 
     await tester.tap(find.text('Memories'));
@@ -339,6 +349,43 @@ void main() {
     expect(find.text('Approve memory write draft'), findsOneWidget);
     expect(find.text('Pending memory approvals'), findsNothing);
     expect(find.textContaining('(pending)'), findsNothing);
+  });
+
+  testWidgets('records local ranking feedback after opt-in', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const MediaPipelineApp());
+
+    await tester.tap(find.text('Memories'));
+    await tester.pumpAndSettle();
+
+    final feedbackButton = tester.widget<OutlinedButton>(
+      find.byKey(const ValueKey<String>('feedback-This week in 2024-favorited')),
+    );
+    expect(feedbackButton.onPressed, isNull);
+    expect(find.text('Local ranking feedback'), findsOneWidget);
+    expect(find.text('Favorited: This week in 2024'), findsNothing);
+
+    await tester.tap(find.text('Collect local ranking feedback'));
+    await tester.pumpAndSettle();
+
+    final enabledFeedbackButton = tester.widget<OutlinedButton>(
+      find.byKey(const ValueKey<String>('feedback-This week in 2024-favorited')),
+    );
+    expect(enabledFeedbackButton.onPressed, isNotNull);
+    await tester.tap(
+      find.byKey(const ValueKey<String>('feedback-This week in 2024-favorited')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Local ranking feedback'), findsOneWidget);
+    expect(find.text('Feedback collection is on. The app stores events locally only.'), findsOneWidget);
+    expect(find.text('Favorited: This week in 2024'), findsOneWidget);
   });
 }
 

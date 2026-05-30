@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'immich_connection.dart';
 import 'memory_curator.dart';
+import 'memory_feedback.dart';
 import 'memory_write_flow.dart';
 import 'immich_phone_checklist_store.dart';
 import 'pipeline_models.dart';
@@ -1133,6 +1134,8 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
   String? _message;
   late List<MemoryPreviewAsset> _assets;
   final List<MemoryWriteDraft> _pendingDrafts = [];
+  final List<MemoryFeedbackEvent> _feedbackEvents = [];
+  bool _collectingFeedback = false;
   bool _loadingLiveAssets = false;
 
   @override
@@ -1217,6 +1220,33 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
     });
   }
 
+  void _toggleFeedbackCollection(bool enabled) {
+    setState(() {
+      _collectingFeedback = enabled;
+    });
+  }
+
+  void _recordFeedback(
+    MemoryPreviewCandidate candidate,
+    MemoryFeedbackEventType type,
+  ) {
+    if (!_collectingFeedback) {
+      return;
+    }
+
+    setState(() {
+      _feedbackEvents.insert(
+        0,
+        MemoryFeedbackEvent(
+          candidateTitle: candidate.title,
+          assetIds: List.unmodifiable(candidate.assetIds),
+          type: type,
+          recordedAt: DateTime.now(),
+        ),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
@@ -1235,7 +1265,7 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
           const SizedBox(height: 8),
           const Text('Preview-only mode.'),
           const SizedBox(height: 4),
-          const Text('This does not write to Immich or store feedback.'),
+          const Text('This does not write to Immich.'),
           const SizedBox(height: 12),
           Text(
             'Preview source: $_previewSourceLabel',
@@ -1281,6 +1311,20 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
                 _message!.trim(),
             ],
           ),
+          const SizedBox(height: 12),
+          SwitchListTile.adaptive(
+            value: _collectingFeedback,
+            onChanged: _toggleFeedbackCollection,
+            title: const Text('Collect local ranking feedback'),
+            subtitle: const Text(
+              'Opt-in only. Feedback stays on this device for now.',
+            ),
+          ),
+          const SizedBox(height: 8),
+          _RankingFeedbackPanel(
+            enabled: _collectingFeedback,
+            events: _feedbackEvents,
+          ),
           if (_displayState == MemoryPreviewDisplayState.sampleReady &&
               preview != null &&
               preview.candidates.isNotEmpty) ...[
@@ -1323,6 +1367,8 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
                 padding: const EdgeInsets.only(bottom: 12),
                 child: _MemoryPreviewCandidateCard(
                   candidate: candidate,
+                  feedbackEnabled: _collectingFeedback,
+                  onFeedbackSelected: (type) => _recordFeedback(candidate, type),
                   onPrepareWrite: () => _prepareMemoryWriteDraft(candidate),
                 ),
               ),
@@ -1358,10 +1404,14 @@ class _MemoryPreviewPlaceholder extends StatelessWidget {
 class _MemoryPreviewCandidateCard extends StatelessWidget {
   const _MemoryPreviewCandidateCard({
     required this.candidate,
+    required this.feedbackEnabled,
+    required this.onFeedbackSelected,
     required this.onPrepareWrite,
   });
 
   final MemoryPreviewCandidate candidate;
+  final bool feedbackEnabled;
+  final ValueChanged<MemoryFeedbackEventType> onFeedbackSelected;
   final VoidCallback onPrepareWrite;
 
   @override
@@ -1404,9 +1454,55 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
                 label: const Text('Prepare memory write draft'),
               ),
             ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final type in MemoryFeedbackEventType.values)
+                  OutlinedButton(
+                    key: ValueKey<String>(
+                      'feedback-${candidate.title}-${type.name}',
+                    ),
+                    onPressed: feedbackEnabled
+                        ? () => onFeedbackSelected(type)
+                        : null,
+                    child: Text(type.label),
+                  ),
+              ],
+            ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _RankingFeedbackPanel extends StatelessWidget {
+  const _RankingFeedbackPanel({
+    required this.enabled,
+    required this.events,
+  });
+
+  final bool enabled;
+  final List<MemoryFeedbackEvent> events;
+
+  @override
+  Widget build(BuildContext context) {
+    return _StatusPanel(
+      icon: Icons.rate_review_outlined,
+      title: 'Local ranking feedback',
+      lines: [
+        if (enabled)
+          'Feedback collection is on. The app stores events locally only.'
+        else
+          'Feedback collection is off until you opt in.',
+        if (events.isEmpty)
+          'No feedback events recorded yet.'
+        else
+          for (final event in events)
+            '${event.type.label}: ${event.candidateTitle}',
+      ],
     );
   }
 }
