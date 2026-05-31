@@ -46,13 +46,24 @@ in the feedback log.
 
 ## Persistence
 
-Persist feedback events to a local JSON file under the app data directory:
+Persist feedback events to a local JSON file under the same app-data base used
+by the rest of Media Pipeline state:
 
 - `memory_feedback_events.json`
 
-Use the same platform-specific application support base as the other local
-Media Pipeline state. The file should remain readable only by the local user and
-must not contain secrets.
+Example locations:
+
+- macOS: `~/Library/Application Support/media_pipeline/memory_feedback_events.json`
+- Linux: `~/.config/media_pipeline/memory_feedback_events.json`
+- Windows: `%APPDATA%\media_pipeline\memory_feedback_events.json`
+
+If the file is missing, initialize the app with an empty feedback list. If the
+JSON is corrupt, parse defensively and ignore unreadable entries rather than
+failing the whole app. To reset local feedback, close the app and delete
+`memory_feedback_events.json`.
+
+The file should remain readable only by the local user and must not contain
+secrets.
 
 ## Scoring Rules
 

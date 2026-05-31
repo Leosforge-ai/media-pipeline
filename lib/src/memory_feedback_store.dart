@@ -21,11 +21,15 @@ class MemoryFeedbackStore {
     }
 
     final content = await file.readAsString();
-    final decoded = jsonDecode(content);
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(content);
+    } on FormatException {
+      return const [];
+    }
+
     if (decoded is! Map) {
-      throw const FormatException(
-        'Memory feedback store must contain a JSON object.',
-      );
+      return const [];
     }
 
     final items = decoded['events'];
@@ -56,10 +60,7 @@ class MemoryFeedbackStore {
 }
 
 Directory _defaultBaseDirectory() {
-  final home =
-      Platform.environment['HOME'] ??
-      Platform.environment['USERPROFILE'] ??
-      '.';
+  final home = _homeDirectoryOrThrow();
   if (Platform.isWindows) {
     final roaming = Platform.environment['APPDATA'];
     if (roaming != null && roaming.trim().isNotEmpty) {
@@ -87,5 +88,21 @@ Directory _defaultBaseDirectory() {
 
   return Directory(
     '$home${Platform.pathSeparator}.config${Platform.pathSeparator}media_pipeline',
+  );
+}
+
+String _homeDirectoryOrThrow() {
+  final home = Platform.environment['HOME'];
+  if (home != null && home.trim().isNotEmpty) {
+    return home.trim();
+  }
+
+  final userProfile = Platform.environment['USERPROFILE'];
+  if (userProfile != null && userProfile.trim().isNotEmpty) {
+    return userProfile.trim();
+  }
+
+  throw StateError(
+    'MemoryFeedbackStore requires HOME or USERPROFILE to locate the app data directory.',
   );
 }

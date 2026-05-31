@@ -1543,7 +1543,13 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final type in MemoryFeedbackEventType.values)
+                for (final type in const [
+                  MemoryFeedbackEventType.opened,
+                  MemoryFeedbackEventType.ignored,
+                  MemoryFeedbackEventType.hidden,
+                  MemoryFeedbackEventType.favorited,
+                  MemoryFeedbackEventType.shared,
+                ])
                   OutlinedButton(
                     key: ValueKey<String>(
                       'feedback-${candidate.title}-${type.name}',

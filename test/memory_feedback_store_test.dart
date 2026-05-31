@@ -64,4 +64,23 @@ void main() {
 
     expect(loaded, isEmpty);
   });
+
+  test('returns an empty list when the feedback store file is corrupted', () async {
+    final tempRoot = await Directory.systemTemp.createTemp(
+      'memory-feedback-corrupt-',
+    );
+    addTearDown(() async {
+      if (await tempRoot.exists()) {
+        await tempRoot.delete(recursive: true);
+      }
+    });
+
+    final store = MemoryFeedbackStore(baseDirectory: tempRoot);
+    await File(store.filePath).create(recursive: true);
+    await File(store.filePath).writeAsString('{not valid json');
+
+    final loaded = await store.load();
+
+    expect(loaded, isEmpty);
+  });
 }

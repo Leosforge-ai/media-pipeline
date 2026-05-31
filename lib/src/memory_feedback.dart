@@ -1,6 +1,13 @@
 import 'memory_curator.dart';
 
-enum MemoryFeedbackEventType { opened, ignored, hidden, favorited, shared }
+enum MemoryFeedbackEventType {
+  opened,
+  ignored,
+  hidden,
+  favorited,
+  shared,
+  unknown,
+}
 
 extension MemoryFeedbackEventTypeLabel on MemoryFeedbackEventType {
   String get label => switch (this) {
@@ -9,6 +16,7 @@ extension MemoryFeedbackEventTypeLabel on MemoryFeedbackEventType {
     MemoryFeedbackEventType.hidden => 'Hidden',
     MemoryFeedbackEventType.favorited => 'Favorited',
     MemoryFeedbackEventType.shared => 'Shared',
+    MemoryFeedbackEventType.unknown => 'Unknown',
   };
 }
 
@@ -80,6 +88,7 @@ int memoryFeedbackScoreAdjustment({
       MemoryFeedbackEventType.hidden => -4,
       MemoryFeedbackEventType.favorited => 5,
       MemoryFeedbackEventType.shared => 4,
+      MemoryFeedbackEventType.unknown => 0,
     };
   }
 
@@ -94,7 +103,7 @@ MemoryFeedbackEventType _feedbackEventTypeValue(Object? value) {
     'hidden' => MemoryFeedbackEventType.hidden,
     'favorited' => MemoryFeedbackEventType.favorited,
     'shared' => MemoryFeedbackEventType.shared,
-    _ => MemoryFeedbackEventType.opened,
+    _ => MemoryFeedbackEventType.unknown,
   };
 }
 
