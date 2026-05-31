@@ -149,7 +149,8 @@ until that design is reviewed.
 Status: in progress. The app now includes an opt-in local feedback scaffold in
 the Memories panel, and the Phase 7 boundary is documented in
 [`docs/RANKING_FEEDBACK_DESIGN.md`](RANKING_FEEDBACK_DESIGN.md). The current
-work still stays local and does not yet change ranking scores.
+work stays local, and the preview can apply small rules-first score
+adjustments from feedback without introducing a trained model.
 
 Phase 7 verification:
 
@@ -162,7 +163,8 @@ Expected outcome:
 
 - Feedback events are recorded only after explicit opt-in.
 - Feedback stays local-only and is not exported or sent to external services.
-- Preview ranking remains rules-first with no trained-model score changes.
+- Preview ranking remains rules-first and only applies light local score
+  adjustments, not a trained model.
 
 ## App Help Library Sources
 

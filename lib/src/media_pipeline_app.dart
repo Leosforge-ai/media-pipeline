@@ -1247,6 +1247,30 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
     });
   }
 
+  List<MemoryPreviewCandidate> _rankCandidatesWithFeedback(
+    List<MemoryPreviewCandidate> candidates,
+  ) {
+    final rankedCandidates = [...candidates];
+    rankedCandidates.sort((left, right) {
+      final leftScore = left.score +
+          memoryFeedbackScoreAdjustment(
+            candidate: left,
+            events: _feedbackEvents,
+          );
+      final rightScore = right.score +
+          memoryFeedbackScoreAdjustment(
+            candidate: right,
+            events: _feedbackEvents,
+          );
+      final scoreOrder = rightScore.compareTo(leftScore);
+      if (scoreOrder != 0) {
+        return scoreOrder;
+      }
+      return left.title.compareTo(right.title);
+    });
+    return rankedCandidates;
+  }
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
@@ -1256,6 +1280,9 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
             referenceDate: _referenceDate,
             assets: _assets,
           );
+    final rankedCandidates = preview == null
+        ? const <MemoryPreviewCandidate>[]
+        : _rankCandidatesWithFeedback(preview.candidates);
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -1362,17 +1389,21 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
               _MemoryWriteDraftPanel(drafts: _pendingDrafts),
               const SizedBox(height: 12),
             ],
-            for (final candidate in preview!.candidates)
+            for (final candidate in rankedCandidates)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
                 child: _MemoryPreviewCandidateCard(
                   candidate: candidate,
                   feedbackEnabled: _collectingFeedback,
+                  feedbackAdjustment: memoryFeedbackScoreAdjustment(
+                    candidate: candidate,
+                    events: _feedbackEvents,
+                  ),
                   onFeedbackSelected: (type) => _recordFeedback(candidate, type),
                   onPrepareWrite: () => _prepareMemoryWriteDraft(candidate),
                 ),
               ),
-            _MemoryPreviewExclusionPanel(exclusions: preview.exclusions),
+            _MemoryPreviewExclusionPanel(exclusions: preview!.exclusions),
           ],
         ],
       ),
@@ -1405,12 +1436,14 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
   const _MemoryPreviewCandidateCard({
     required this.candidate,
     required this.feedbackEnabled,
+    required this.feedbackAdjustment,
     required this.onFeedbackSelected,
     required this.onPrepareWrite,
   });
 
   final MemoryPreviewCandidate candidate;
   final bool feedbackEnabled;
+  final int feedbackAdjustment;
   final ValueChanged<MemoryFeedbackEventType> onFeedbackSelected;
   final VoidCallback onPrepareWrite;
 
@@ -1434,9 +1467,15 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-                Text('Score ${candidate.score}'),
+                Text('Score ${candidate.score + feedbackAdjustment}'),
               ],
             ),
+            if (feedbackAdjustment != 0) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Local feedback adjustment: ${feedbackAdjustment > 0 ? '+' : ''}$feedbackAdjustment',
+              ),
+            ],
             const SizedBox(height: 8),
             Text('Assets: ${candidate.assetIds.join(', ')}'),
             const SizedBox(height: 8),

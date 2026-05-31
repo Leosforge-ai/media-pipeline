@@ -384,7 +384,14 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Local ranking feedback'), findsOneWidget);
-    expect(find.text('Feedback collection is on. The app stores events locally only.'), findsOneWidget);
+    expect(
+      find.text(
+        'Feedback collection is on. The app stores events locally only.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Score 57'), findsWidgets);
+    expect(find.text('Local feedback adjustment: +5'), findsWidgets);
     expect(find.text('Favorited: This week in 2024'), findsOneWidget);
   });
 }
