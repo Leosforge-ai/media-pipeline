@@ -44,6 +44,16 @@ behavior over time:
 Do not store API keys, personal URLs, raw media paths, or full private captions
 in the feedback log.
 
+## Persistence
+
+Persist feedback events to a local JSON file under the app data directory:
+
+- `memory_feedback_events.json`
+
+Use the same platform-specific application support base as the other local
+Media Pipeline state. The file should remain readable only by the local user and
+must not contain secrets.
+
 ## Scoring Rules
 
 The first scoring pass should remain explainable and local:
