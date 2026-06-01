@@ -1,0 +1,48 @@
+name: Automated PR Review
+
+# Cody reviews every PR with a data-loss/safety focus (this repo moves personal media).
+# Replaces CodeRabbit — the safety rules below are ported from the former .coderabbit.yaml.
+# Requires org Actions secret CLAUDE_CODE_OAUTH_TOKEN. No Dalton (no SQL/data layer).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: Cody review (safety)
+    runs-on: ubuntu-latest
+    if: ${{ !contains(fromJSON('["bot", "github-actions[bot]", "dependabot[bot]"]'), github.event.pull_request.user.login) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@476e359e6203e73dad705c8b322e333fabbd7416 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          direct_prompt: |
+            As Cody, review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}
+            — a personal-media pipeline (Flutter app + Bash/Python scripts → Immich) that moves
+            real user files. **Data-loss prevention is the top priority.**
+
+            Get changed files via `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files`.
+            Review .sh, .py, .dart, .yml, .yaml. Skip non-code.
+
+            Safety rules (REQUEST_CHANGES if violated):
+            - Destructive steps must default to dry-run and require an explicit confirmation gate.
+            - Never `rm` / permanent delete — files move to `media_trash`; the restore path must stay intact.
+            - `scripts/06_delete_duplicates.sh`: must parse only real, absolute, quoted Czkawka paths —
+              reject changes that could treat report headers, dimensions, or sizes as file paths.
+            - Shell: `set -euo pipefail`, quoted expansions, paths with spaces/non-English chars preserved.
+            - Immich `/data` (upload) stays separate from `/library` (external, read-only unless documented).
+            - No secrets or personal paths committed; GitHub Actions pinned to SHAs.
+
+            Also review correctness, error handling, and test coverage. Verify each finding against the
+            actual code; cite file:line. Aggregate under CRITICAL / HIGH / MEDIUM / LOW.
+            REQUEST_CHANGES if any CRITICAL/HIGH/MEDIUM, else APPROVE. Be concise.
