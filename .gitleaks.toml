@@ -1,0 +1,18 @@
+title = "gitleaks configuration for media-pipeline"
+
+# This repo handles personal media + rclone/Immich config. Allowlist template files
+# and the large local media staging dirs (never committed, but defensive).
+[allowlist]
+description = "Templates and local media/build artifacts"
+paths = [
+  "^\\.dart_tool/",
+  "^build/",
+  "^node_modules/",
+  "^immich/env\\.template$",
+  "^.*raw_takeout_zips/",
+  "^.*raw_gdrive/",
+  "^.*takeout_extracted/",
+  "^.*cleaning_staging/",
+  "^.*immich_library/",
+  "^.*media_trash/",
+]
