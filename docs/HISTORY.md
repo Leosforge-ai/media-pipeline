@@ -24,3 +24,9 @@ CodeRabbit with an in-house **Cody** PR review (no Dalton — no data layer). No
 so no uv migration.
 **Pivots:** Review tooling — CodeRabbit → company pr-review (safety rules ported, not lost).
 **Outcome:** Repo aligned with company-os standards; safety model preserved.
+
+## Phase 2 — company-os onboarding (2026-06-02)
+
+**Context:** Formally bring the repository under company-os governance.
+**Decisions:** Added `.company/` project context and aligned repo with company-wide operating standards.
+**Outcome:** Repo is officially registered and governed by company-os.
