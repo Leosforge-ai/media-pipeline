@@ -44,4 +44,28 @@ void main() {
       1,
     );
   });
+
+  test('treats unknown feedback event types as non-scoring metadata', () {
+    final event = MemoryFeedbackEvent.fromJson({
+      'candidateTitle': 'Album: Lisbon Week',
+      'assetIds': ['live-1'],
+      'type': 'mystery',
+      'recordedAt': '2026-05-30T12:00:00.000',
+    });
+
+    expect(event.type, MemoryFeedbackEventType.unknown);
+    expect(event.type.label, 'Unknown');
+    expect(
+      memoryFeedbackScoreAdjustment(
+        candidate: MemoryPreviewCandidate(
+          title: 'Album: Lisbon Week',
+          assetIds: ['live-1'],
+          score: 30,
+          reasons: const ['Album membership suggests an event'],
+        ),
+        events: [event],
+      ),
+      0,
+    );
+  });
 }

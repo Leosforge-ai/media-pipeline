@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'immich_connection.dart';
 import 'memory_curator.dart';
 import 'memory_feedback.dart';
+import 'memory_feedback_store.dart';
 import 'memory_write_flow.dart';
 import 'immich_phone_checklist_store.dart';
 import 'pipeline_models.dart';
@@ -16,12 +17,14 @@ class MediaPipelineApp extends StatelessWidget {
     super.key,
     this.immichClient,
     this.checklistStore,
+    this.feedbackStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
   });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  final MemoryFeedbackStore? feedbackStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
 
@@ -41,6 +44,7 @@ class MediaPipelineApp extends StatelessWidget {
       home: PipelineHomePage(
         immichClient: immichClient,
         checklistStore: checklistStore,
+        feedbackStore: feedbackStore,
         memoryPreviewState: memoryPreviewState,
         memoryPreviewMessage: memoryPreviewMessage,
       ),
@@ -53,12 +57,14 @@ class PipelineHomePage extends StatefulWidget {
     super.key,
     this.immichClient,
     this.checklistStore,
+    this.feedbackStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
   });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  final MemoryFeedbackStore? feedbackStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
 
@@ -380,6 +386,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   immichClient: _immichClient,
                   serverUrlController: _immichUrlController,
                   apiKeyController: _immichApiKeyController,
+                  feedbackStore: widget.feedbackStore,
                   initialDisplayState: widget.memoryPreviewState,
                   initialMessage: widget.memoryPreviewMessage,
                 ),
@@ -1112,6 +1119,7 @@ class _MemoryPreviewDetail extends StatefulWidget {
     required this.immichClient,
     required this.serverUrlController,
     required this.apiKeyController,
+    required this.feedbackStore,
     required this.initialDisplayState,
     this.initialMessage,
   });
@@ -1119,6 +1127,7 @@ class _MemoryPreviewDetail extends StatefulWidget {
   final ImmichApiClient immichClient;
   final TextEditingController serverUrlController;
   final TextEditingController apiKeyController;
+  final MemoryFeedbackStore? feedbackStore;
   final MemoryPreviewDisplayState initialDisplayState;
   final String? initialMessage;
 
@@ -1134,8 +1143,10 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
   String? _message;
   late List<MemoryPreviewAsset> _assets;
   final List<MemoryWriteDraft> _pendingDrafts = [];
+  late final MemoryFeedbackStore _feedbackStore;
   final List<MemoryFeedbackEvent> _feedbackEvents = [];
   bool _collectingFeedback = false;
+  bool _loadingFeedback = true;
   bool _loadingLiveAssets = false;
 
   @override
@@ -1144,9 +1155,33 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
     _displayState = widget.initialDisplayState;
     _previewSourceLabel = 'sample data';
     _message = widget.initialMessage?.trim();
+    _feedbackStore = widget.feedbackStore ?? MemoryFeedbackStore();
     _assets = widget.initialDisplayState == MemoryPreviewDisplayState.sampleReady
         ? buildMemoryPreviewSampleAssets()
         : const [];
+    unawaited(_loadFeedbackEvents());
+  }
+
+  Future<void> _loadFeedbackEvents() async {
+    try {
+      final events = await _feedbackStore.load();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _feedbackEvents
+          ..clear()
+          ..addAll(events);
+        _loadingFeedback = false;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loadingFeedback = false;
+      });
+    }
   }
 
   Future<void> _loadLivePreviewAssets() async {
@@ -1245,6 +1280,15 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
         ),
       );
     });
+    unawaited(_saveFeedbackEvents());
+  }
+
+  Future<void> _saveFeedbackEvents() async {
+    try {
+      await _feedbackStore.save(_feedbackEvents);
+    } catch (_) {
+      // Keep feedback local and best-effort; preview remains usable if saving fails.
+    }
   }
 
   List<MemoryPreviewCandidate> _rankCandidatesWithFeedback(
@@ -1350,6 +1394,7 @@ class _MemoryPreviewDetailState extends State<_MemoryPreviewDetail> {
           const SizedBox(height: 8),
           _RankingFeedbackPanel(
             enabled: _collectingFeedback,
+            loading: _loadingFeedback,
             events: _feedbackEvents,
           ),
           if (_displayState == MemoryPreviewDisplayState.sampleReady &&
@@ -1498,7 +1543,13 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final type in MemoryFeedbackEventType.values)
+                for (final type in const [
+                  MemoryFeedbackEventType.opened,
+                  MemoryFeedbackEventType.ignored,
+                  MemoryFeedbackEventType.hidden,
+                  MemoryFeedbackEventType.favorited,
+                  MemoryFeedbackEventType.shared,
+                ])
                   OutlinedButton(
                     key: ValueKey<String>(
                       'feedback-${candidate.title}-${type.name}',
@@ -1520,10 +1571,12 @@ class _MemoryPreviewCandidateCard extends StatelessWidget {
 class _RankingFeedbackPanel extends StatelessWidget {
   const _RankingFeedbackPanel({
     required this.enabled,
+    required this.loading,
     required this.events,
   });
 
   final bool enabled;
+  final bool loading;
   final List<MemoryFeedbackEvent> events;
 
   @override
@@ -1532,6 +1585,9 @@ class _RankingFeedbackPanel extends StatelessWidget {
       icon: Icons.rate_review_outlined,
       title: 'Local ranking feedback',
       lines: [
+        if (loading)
+          'Loading saved feedback events...'
+        else
         if (enabled)
           'Feedback collection is on. The app stores events locally only.'
         else

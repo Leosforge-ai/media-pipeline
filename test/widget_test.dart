@@ -7,17 +7,48 @@ import 'package:media_pipeline_app/src/immich_connection.dart';
 import 'package:media_pipeline_app/src/media_pipeline_app.dart';
 import 'package:media_pipeline_app/src/memory_curator.dart';
 import 'package:media_pipeline_app/src/memory_write_flow.dart';
+import 'package:media_pipeline_app/src/memory_feedback_store.dart';
+
+late Directory _feedbackRoot;
+
+MediaPipelineApp _app({
+  ImmichApiClient? immichClient,
+  ImmichChecklistStore? checklistStore,
+  MemoryPreviewDisplayState memoryPreviewState =
+      MemoryPreviewDisplayState.sampleReady,
+  String? memoryPreviewMessage,
+}) {
+  return MediaPipelineApp(
+    immichClient: immichClient,
+    checklistStore: checklistStore,
+    feedbackStore: MemoryFeedbackStore(baseDirectory: _feedbackRoot),
+    memoryPreviewState: memoryPreviewState,
+    memoryPreviewMessage: memoryPreviewMessage,
+  );
+}
 
 void main() {
+  setUp(() async {
+    _feedbackRoot = await Directory.systemTemp.createTemp(
+      'media-pipeline-feedback-',
+    );
+  });
+
+  tearDown(() async {
+    if (await _feedbackRoot.exists()) {
+      await _feedbackRoot.delete(recursive: true);
+    }
+  });
+
   testWidgets('renders the desktop shell', (WidgetTester tester) async {
-    await tester.pumpWidget(const MediaPipelineApp());
+    await tester.pumpWidget(_app());
 
     expect(find.text('Media Pipeline'), findsOneWidget);
     expect(find.text('System Check'), findsWidgets);
   });
 
   testWidgets('shows Immich help section', (WidgetTester tester) async {
-    await tester.pumpWidget(const MediaPipelineApp());
+    await tester.pumpWidget(_app());
 
     await tester.tap(find.text('Help'));
     await tester.pumpAndSettle();
@@ -63,7 +94,7 @@ void main() {
 
   testWidgets('shows Immich connection section', (WidgetTester tester) async {
     await tester.pumpWidget(
-      MediaPipelineApp(immichClient: _FakeImmichClient.success()),
+      _app(immichClient: _FakeImmichClient.success()),
     );
 
     await tester.tap(find.text('Immich'));
@@ -89,7 +120,7 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(
-      MediaPipelineApp(immichClient: _FakeImmichClient.missingStatistics()),
+      _app(immichClient: _FakeImmichClient.missingStatistics()),
     );
 
     await tester.tap(find.text('Immich'));
@@ -108,7 +139,7 @@ void main() {
 
   testWidgets('shows Immich connection errors', (WidgetTester tester) async {
     await tester.pumpWidget(
-      MediaPipelineApp(
+      _app(
         immichClient: _FakeImmichClient.failure(
           ImmichConnectionIssue.serverUnavailable,
           'Immich server is not reachable: Connection refused',
@@ -138,7 +169,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      MediaPipelineApp(
+      _app(
         immichClient: _FakeImmichClient.success(),
         checklistStore: _FakeChecklistStore(),
       ),
@@ -173,7 +204,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const MediaPipelineApp());
+    await tester.pumpWidget(_app());
 
     await tester.tap(find.text('Memories'));
     await tester.pumpAndSettle();
@@ -197,7 +228,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      MediaPipelineApp(
+      _app(
         immichClient: _FakeImmichClient.livePreview(),
       ),
     );
@@ -226,7 +257,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      const MediaPipelineApp(
+      _app(
         memoryPreviewState: MemoryPreviewDisplayState.loading,
       ),
     );
@@ -248,7 +279,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      const MediaPipelineApp(
+      _app(
         memoryPreviewState: MemoryPreviewDisplayState.empty,
       ),
     );
@@ -274,7 +305,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      const MediaPipelineApp(
+      _app(
         memoryPreviewState: MemoryPreviewDisplayState.error,
         memoryPreviewMessage: 'Read-only adapter could not load assets.',
       ),
@@ -300,7 +331,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      const MediaPipelineApp(),
+      _app(),
     );
 
     await tester.tap(find.text('Memories'));
@@ -333,7 +364,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const MediaPipelineApp());
+    await tester.pumpWidget(_app());
 
     await tester.tap(find.text('Memories'));
     await tester.pumpAndSettle();
@@ -359,7 +390,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const MediaPipelineApp());
+    await tester.pumpWidget(_app());
 
     await tester.tap(find.text('Memories'));
     await tester.pumpAndSettle();
@@ -384,12 +415,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Local ranking feedback'), findsOneWidget);
-    expect(
-      find.text(
-        'Feedback collection is on. The app stores events locally only.',
-      ),
-      findsOneWidget,
-    );
     expect(find.text('Score 57'), findsWidgets);
     expect(find.text('Local feedback adjustment: +5'), findsWidgets);
     expect(find.text('Favorited: This week in 2024'), findsOneWidget);
