@@ -75,32 +75,60 @@ build_mount_commands() {
 	if [[ -n "$pkg" ]]; then
 		printf 'sudo apt-get update && sudo apt-get install -y %s\n' "$pkg"
 	fi
-	printf 'sudo mkdir -p %s\n' "$mount_point"
-	printf 'sudo mount -t %s %s %s\n' "$mount_type" "$device" "$mount_point"
+	printf 'sudo mkdir -p %q\n' "$mount_point"
+	printf 'sudo mount -t %s %q %q\n' "$mount_type" "$device" "$mount_point"
 }
 
 # ---------------------------------------------------------------------------
 # Pure logic (unit-testable): boot-disk exclusion
 # ---------------------------------------------------------------------------
 
-# disk_name_from_partition PARTITION_PATH
-# Resolves a partition device path (e.g. /dev/sda1) to its parent disk name
-# (e.g. sda) via `lsblk -no PKNAME`. Falls back to the partition's own base
-# name if lsblk reports no parent (e.g. the device is already a whole disk).
+# disk_name_from_partition DEVICE_PATH
+# Resolves a block device path (e.g. /dev/sda1, /dev/mapper/vg-root) to the
+# name of the top-level whole-disk device it ultimately lives on (e.g.
+# `sda`), by walking the `lsblk` PKNAME parent chain until a TYPE=disk
+# device is reached -- not just a single hop. This matters for LVM roots
+# (`/dev/mapper/vg-root` -> its physical-volume partition, e.g. `sda1` -> the
+# disk, `sda`) where a single PKNAME hop would stop at the intermediate
+# partition and fail to exclude sibling partitions on the same physical
+# disk. Any bracketed btrfs subvolume suffix (e.g. `/dev/sda2[/@]`, as
+# `findmnt` reports for a subvolume root) is stripped before resolution.
+# Falls back to the current device's own base name if lsblk can't report a
+# type/parent for it (e.g. it's already a whole disk, or lsblk has nothing
+# to say about it -- as in tests with limited stubs).
 disk_name_from_partition() {
-	local part="$1"
-	local base pk
-	base="$(basename "$part")"
-	pk="$(lsblk -no PKNAME "$part" 2>/dev/null || true)"
-	if [[ -n "$pk" ]]; then
-		printf '%s\n' "$pk"
-	else
-		printf '%s\n' "$base"
-	fi
+	local device="$1"
+	device="${device%%\[*}" # strip bracketed btrfs subvolume suffix
+	local current="$device" type pk name
+	local -i hops=0 max_hops=10
+
+	while true; do
+		name="$(basename "$current")"
+		type="$(lsblk -no TYPE "$current" 2>/dev/null || true)"
+		if [[ "$type" == "disk" ]]; then
+			printf '%s\n' "$name"
+			return 0
+		fi
+
+		pk="$(lsblk -no PKNAME "$current" 2>/dev/null || true)"
+		if [[ -z "$pk" ]]; then
+			printf '%s\n' "$name"
+			return 0
+		fi
+
+		current="/dev/$pk"
+		hops+=1
+		if ((hops > max_hops)); then
+			printf '%s\n' "$(basename "$current")"
+			return 0
+		fi
+	done
 }
 
 # root_boot_disk
-# Resolves the disk name backing the current root filesystem ("/").
+# Resolves the top-level disk name backing the current root filesystem ("/"),
+# walking through LVM/device-mapper layers and stripping btrfs subvolume
+# suffixes as needed. See disk_name_from_partition for details.
 root_boot_disk() {
 	local root_src
 	root_src="$(findmnt / -no SOURCE)"
