@@ -71,6 +71,12 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   final Map<String, StepRunState> _states = {};
   late final PipelineRunner _runner;
   late final GuidedRunController _guidedRunController;
+  // Resolved via buildGuidedRunSteps(), which throws if the chain ever
+  // includes a PipelineRisk.confirmRequired step. Looking guided-run steps
+  // up through this map (instead of _steps directly) keeps that safety
+  // check live in the running app, not just exercised by tests that call
+  // buildGuidedRunSteps() in isolation.
+  late final Map<String, PipelineStep> _guidedRunStepsById;
   late final List<List<String>> _guidedSegments;
   int _guidedSegmentIndex = 0;
   bool _guidedRunning = false;
@@ -99,6 +105,9 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     _settings = PipelineSettings.defaults();
     _runner = PipelineRunner(workingDirectory: Directory.current.path);
     _guidedRunController = GuidedRunController(runner: _runner);
+    _guidedRunStepsById = {
+      for (final step in buildGuidedRunSteps()) step.id: step,
+    };
     _guidedSegments = buildGuidedRunSegments();
     _immichClient = widget.immichClient ?? ImmichApiClient();
     _checklistStore = widget.checklistStore ?? ImmichChecklistStore();
@@ -234,8 +243,19 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     });
   }
 
-  PipelineStep _stepById(String id) {
-    return _steps.singleWhere((step) => step.id == id);
+  /// Resolves a guided-run step id via [_guidedRunStepsById] (built from
+  /// [buildGuidedRunSteps]) rather than [_steps] directly, so every guided
+  /// step the app actually runs has passed that function's confirm-gate
+  /// safety check.
+  PipelineStep _guidedStepById(String id) {
+    final step = _guidedRunStepsById[id];
+    if (step == null) {
+      throw StateError(
+        'Guided run segment references step id "$id" that is not part of '
+        'the validated guided run chain.',
+      );
+    }
+    return step;
   }
 
   bool get _guidedRunFinished => _guidedSegmentIndex >= _guidedSegments.length;
@@ -245,7 +265,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       return false;
     }
     return _guidedSegments[_guidedSegmentIndex]
-        .map(_stepById)
+        .map(_guidedStepById)
         .every(isStepSupportedOnCurrentPlatform);
   }
 
@@ -302,7 +322,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     }
 
     final segmentStepIds = _guidedSegments[_guidedSegmentIndex];
-    final segmentSteps = segmentStepIds.map(_stepById).toList();
+    final segmentSteps = segmentStepIds.map(_guidedStepById).toList();
 
     setState(() {
       _settings = _settings.copyWith(
