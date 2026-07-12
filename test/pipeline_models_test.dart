@@ -85,6 +85,23 @@ void main() {
       );
     });
 
+    test(
+      'never includes interactive or privileged setup steps that would '
+      'hang or fail unattended',
+      () {
+        // setup-dependencies (01) runs sudo calls; configure-rclone (02)
+        // runs the interactive `rclone config` wizard on stdin/stdout, and
+        // PipelineRunner.run() closes child stdin immediately when a step
+        // has no stdinText — so either step would hang or error if it were
+        // ever auto-chained. Both stay manual-only, like setup-immich /
+        // verify-immich already are.
+        expect(guidedRunStepIds, isNot(contains('setup-dependencies')));
+        expect(guidedRunStepIds, isNot(contains('configure-rclone')));
+        expect(guidedRunStepIds, isNot(contains('setup-immich')));
+        expect(guidedRunStepIds, isNot(contains('verify-immich')));
+      },
+    );
+
     test('buildGuidedRunSteps resolves steps in the declared order and '
         'none are confirm-gated', () {
       final steps = buildGuidedRunSteps();

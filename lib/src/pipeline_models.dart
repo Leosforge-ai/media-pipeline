@@ -246,13 +246,25 @@ List<PipelineStep> buildPipelineSteps() {
 /// step — those always require a separate, explicit, human-triggered action
 /// and must never be reachable from the automatic chain.
 ///
+/// It also excludes every step that is interactive or needs elevated
+/// privileges and therefore cannot run unattended:
+/// - `setup-dependencies` (`01_setup_dependencies.sh`) makes `sudo` calls.
+/// - `configure-rclone` (`02_configure_rclone.sh`) runs the interactive
+///   `rclone config` wizard on stdin/stdout. `PipelineRunner.run()` closes
+///   child stdin immediately whenever a step has no `stdinText`, so this
+///   step would simply hang (or error) if it were ever auto-chained.
+/// - `setup-immich`/`verify-immich` (Docker-dependent, linux-only) and the
+///   Immich takeout-duplicate dry-run are likewise left out of the
+///   automatic chain, same as before.
+///
+/// These stay in the per-step manual list as one-time/occasional setup
+/// actions a human runs directly, not as part of an unattended chain.
+///
 /// The guided run still pauses at two real decision points even though the
 /// next guided step is not itself confirm-gated: see
 /// [guidedRunCheckpointStepIds].
 const List<String> guidedRunStepIds = [
   'check-system',
-  'setup-dependencies',
-  'configure-rclone',
   'stitch-metadata',
   'scan-duplicates',
   'delete-dry-run',
