@@ -176,6 +176,22 @@ Inspect first. Only after review, optionally move verified duplicates from
 ./scripts/12_clean_immich_takeout_duplicates.sh --confirm
 ```
 
+If Immich shows Apple Live Photos as two separate timeline assets (a still
+and a short motion clip, split apart by Google Takeout), dry-run the Live
+Photo dedupe step. By default it scans `immich_library`; set
+`LIVE_PHOTO_SCAN_DIR=$CLEANING_STAGING` to run it before syncing instead:
+
+```bash
+./scripts/13_dedupe_live_photos.sh | tee /tmp/live_photo_dedupe_dry_run.txt
+```
+
+Inspect first. Only after review, optionally move verified standalone motion
+videos into `media_trash` (the still is always kept):
+
+```bash
+./scripts/13_dedupe_live_photos.sh --confirm
+```
+
 Install/start Immich:
 
 ```bash
@@ -291,6 +307,7 @@ Ubuntu or Debian-like Linux is recommended. The dependency script installs:
 - Similar-image and similar-video detection can have false positives. Review dry-runs.
 - Read-only Immich external libraries cannot be modified by Immich. If you trash items in Immich, the original files may reappear after rescan because the read-only mount prevents Immich from deleting originals.
 - If Immich shows duplicate assets from `Takeout/Google Fotos/YYYY/` and `Takeout/Google Fotos/Fotos de YYYY/`, fix the duplicate source files in `immich_library` with `12_clean_immich_takeout_duplicates.sh`, then restart Immich and rescan `/library`.
+- If Immich shows an Apple Live Photo as two separate assets (a still plus a 1-3s motion clip), Google Takeout split what was originally one Live Photo asset into two files sharing a basename. `13_dedupe_live_photos.sh` moves the redundant standalone motion clip to `media_trash`, keeping the still; it does not attempt to re-link them as a single Live Photo asset in Immich.
 
 
 ## CodeRabbit and CI/CD
