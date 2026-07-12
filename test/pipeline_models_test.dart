@@ -30,13 +30,111 @@ void main() {
       'delete-dry-run': const StepRunState(status: PipelineStepStatus.idle),
     };
 
-    expect(canRunStep(step: confirm, states: states), isFalse);
+    expect(
+      canRunStep(
+        step: confirm,
+        states: states,
+        duplicateThumbnailReviewAcknowledged: true,
+      ),
+      isFalse,
+    );
 
     states['delete-dry-run'] = const StepRunState(
       status: PipelineStepStatus.succeeded,
     );
 
-    expect(canRunStep(step: confirm, states: states), isTrue);
+    expect(
+      canRunStep(
+        step: confirm,
+        states: states,
+        duplicateThumbnailReviewAcknowledged: true,
+      ),
+      isTrue,
+    );
+  });
+
+  group('delete-confirm duplicate thumbnail review gate (#49)', () {
+    late PipelineStep confirm;
+    late Map<String, StepRunState> succeededDryRunStates;
+
+    setUp(() {
+      confirm = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'delete-confirm',
+      );
+      succeededDryRunStates = {
+        'delete-dry-run': const StepRunState(
+          status: PipelineStepStatus.succeeded,
+        ),
+      };
+    });
+
+    test('delete-confirm opts into the review gate', () {
+      expect(confirm.requiresDuplicateThumbnailReview, isTrue);
+    });
+
+    test('other confirm-gated steps do not require the review', () {
+      final restoreConfirm = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'restore-confirm',
+      );
+
+      expect(restoreConfirm.requiresDuplicateThumbnailReview, isFalse);
+    });
+
+    test(
+      'stays blocked when the dry-run succeeded but the review has not '
+      'been acknowledged — default fails closed',
+      () {
+        expect(
+          canRunStep(step: confirm, states: succeededDryRunStates),
+          isFalse,
+        );
+        expect(
+          canRunStep(
+            step: confirm,
+            states: succeededDryRunStates,
+            duplicateThumbnailReviewAcknowledged: false,
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'stays blocked when the review is acknowledged but the dry-run has '
+      'not succeeded — the thumbnail-review gate never replaces the '
+      'existing dry-run gate',
+      () {
+        final states = {
+          'delete-dry-run': const StepRunState(
+            status: PipelineStepStatus.idle,
+          ),
+        };
+
+        expect(
+          canRunStep(
+            step: confirm,
+            states: states,
+            duplicateThumbnailReviewAcknowledged: true,
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'only unlocks once both the dry-run succeeded AND the review was '
+      'acknowledged',
+      () {
+        expect(
+          canRunStep(
+            step: confirm,
+            states: succeededDryRunStates,
+            duplicateThumbnailReviewAcknowledged: true,
+          ),
+          isTrue,
+        );
+      },
+    );
   });
 
   test('settings are converted into process environment', () {

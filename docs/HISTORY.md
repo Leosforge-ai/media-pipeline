@@ -63,3 +63,46 @@ plumbing as manual runs.
 (dedup delete confirmation, Immich rescan trigger) instead of ~7 separate manual triggers,
 while the confirm-gate safety invariant (`PipelineRisk.confirmRequired` steps always require
 a separate explicit human action) is unchanged and covered by new automated tests.
+
+## Phase 4 — Thumbnail-diff dedup review before confirm (2026-07-12)
+
+**Context:** `06_delete_duplicates.sh`'s dry-run output is Czkawka text; trusting it before
+`--confirm` meant manually grepping `Keep:`/`Would trash:` lines (#49). The repo owner was not
+fully confident Czkawka's similarity grouping was trustworthy enough to act on from text alone.
+**Decisions:** Added `lib/src/duplicate_report.dart`, a read-only, display-only parser that
+reads back the exact `Keep: <path>` / `Would trash: <path>` announcement lines
+`06_delete_duplicates.sh`'s own `process_czkawka_report`/`score_keep_path` logic already prints
+to stdout in dry-run mode — never the raw Czkawka report files, and never re-deriving which
+file would be kept. Any other line (the SAFETY NOTICE banner, `DRY RUN MODE`/`CONFIRM MODE`,
+`==> Processing duplicate report: ...`, Czkawka `Found ...` headers, dimension/size lines,
+`Missing, skipping: ...`, `Refusing outside staging: ...`, non-absolute paths) is never matched
+and never treated as a path, per the existing `06_delete_duplicates.sh` parsing safety rule.
+Large duplicate sets are sampled to at most 20 pairs with a fixed seed (reproducible across
+reviews of the same output) and the dialog always shows an honest "Showing N of M pairs" count
+— nothing is silently truncated. `media_pipeline_app.dart` renders the sampled pairs
+side-by-side via `Image.file` for still-image formats, falling back to a file icon + filename
+for video/unsupported formats or any image that fails to load (no video-thumbnail-generation
+dependency was added).
+
+The review is wired as an **additional, additive** condition on the existing `delete-confirm`
+gate, never a replacement for it: `PipelineStep` gained `requiresDuplicateThumbnailReview`
+(true only for `delete-confirm`), and `canRunStep()` now also requires an explicit
+`duplicateThumbnailReviewAcknowledged: true` — defaulting to `false`, so the gate fails closed
+for any caller that doesn't pass it. The app tracks this in `_dedupReviewAcknowledged`, set
+when the review dialog is opened and reset to `false` whenever `delete-dry-run` starts running
+again (manually or via the guided run), since a fresh dry run can produce a different duplicate
+set. `restore-confirm` is unaffected.
+**Pivots:** None — parsing the script's own dry-run stdout (already captured in the app's
+`StepRunState.log`) instead of re-reading/re-parsing Czkawka report files from `REPORT_DIR` was
+chosen deliberately: it guarantees the review always matches exactly what the dry-run step just
+produced, and avoids re-implementing `06_delete_duplicates.sh`'s `score_keep_path` keep-scoring
+heuristic in Dart (which would risk silent drift from the bash logic that actually decides what
+moves).
+**Outcome:** `06_delete_duplicates.sh` and its Czkawka-report parsing are unchanged. The
+confirm-gate safety invariant is strictly strengthened, not weakened: `delete-confirm` now
+requires both the dry-run succeeding and the thumbnail review having been shown, proven by a
+dedicated test group in `test/pipeline_models_test.dart`, a real-script assertion in
+`test/app_driven_simulation_test.dart`, and an end-to-end widget test
+(`test/dedup_review_widget_test.dart`) using a fake `PipelineRunner` seam
+(`MediaPipelineApp.runner`) that proves the confirm button stays disabled until the review
+dialog is opened, and that re-running the dry-run invalidates a prior acknowledgment.

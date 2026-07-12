@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'duplicate_report.dart';
 import 'immich_connection.dart';
 import 'memory_curator.dart';
 import 'memory_feedback.dart';
@@ -18,12 +19,18 @@ class MediaPipelineApp extends StatelessWidget {
     this.checklistStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
+    this.runner,
   });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
+  // Test-only seam: lets widget tests substitute a fake PipelineRunner
+  // instead of spawning real pipeline scripts, so the delete-confirm
+  // thumbnail-review gate (#49) can be exercised end-to-end without side
+  // effects. Left null in the real app, which builds its own runner.
+  final PipelineRunner? runner;
 
   @override
   Widget build(BuildContext context) {
@@ -43,6 +50,7 @@ class MediaPipelineApp extends StatelessWidget {
         checklistStore: checklistStore,
         memoryPreviewState: memoryPreviewState,
         memoryPreviewMessage: memoryPreviewMessage,
+        runner: runner,
       ),
     );
   }
@@ -55,12 +63,14 @@ class PipelineHomePage extends StatefulWidget {
     this.checklistStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
+    this.runner,
   });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
+  final PipelineRunner? runner;
 
   @override
   State<PipelineHomePage> createState() => _PipelineHomePageState();
@@ -96,6 +106,14 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   bool _checkingImmich = false;
   ImmichConnectionReport? _immichReport;
   ImmichConnectionException? _immichFailure;
+  // Whether a human has opened the thumbnail-diff duplicate review screen
+  // (issue #49) for the *current* "delete-dry-run" output at least once.
+  // Reset to false whenever that dry-run step starts running again, so a
+  // stale acknowledgment can never carry over to a new (possibly
+  // different) duplicate set. Read by canRunStep() as an additional,
+  // additive gate on top of the existing dry-run-succeeded requirement for
+  // "delete-confirm" — see PipelineStep.requiresDuplicateThumbnailReview.
+  bool _dedupReviewAcknowledged = false;
 
   PipelineStep get _selectedStep => _steps[_selectedIndex];
 
@@ -103,7 +121,8 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   void initState() {
     super.initState();
     _settings = PipelineSettings.defaults();
-    _runner = PipelineRunner(workingDirectory: Directory.current.path);
+    _runner =
+        widget.runner ?? PipelineRunner(workingDirectory: Directory.current.path);
     _guidedRunController = GuidedRunController(runner: _runner);
     _guidedRunStepsById = {
       for (final step in buildGuidedRunSteps()) step.id: step,
@@ -200,7 +219,12 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
 
   Future<void> _runSelectedStep() async {
     final step = _selectedStep;
-    if (_runningStepId != null || !canRunStep(step: step, states: _states)) {
+    final canRun = canRunStep(
+      step: step,
+      states: _states,
+      duplicateThumbnailReviewAcknowledged: _dedupReviewAcknowledged,
+    );
+    if (_runningStepId != null || !canRun) {
       return;
     }
 
@@ -211,6 +235,11 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       );
       _runningStepId = step.id;
       _states[step.id] = const StepRunState(status: PipelineStepStatus.running);
+      if (step.id == 'delete-dry-run') {
+        // A fresh dry-run can produce a different duplicate set, so any
+        // earlier thumbnail-review acknowledgment no longer applies.
+        _dedupReviewAcknowledged = false;
+      }
     });
 
     final result = await _runner.run(
@@ -344,6 +373,10 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
           _states[step.id] = const StepRunState(
             status: PipelineStepStatus.running,
           );
+          if (step.id == 'delete-dry-run') {
+            // Same invalidation rule as the manual single-step run path.
+            _dedupReviewAcknowledged = false;
+          }
         });
       },
       onStepComplete: (step, stepResult) {
@@ -385,6 +418,27 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
         _guidedSegmentIndex += 1;
       }
     });
+  }
+
+  /// Opens the thumbnail-diff duplicate review dialog (#49) for the current
+  /// "delete-dry-run" output and records that it was shown.
+  ///
+  /// Marking the review acknowledged as soon as the dialog is opened (not
+  /// only after it closes) is intentional: opening it is the concrete,
+  /// testable user action this gate requires — see
+  /// `PipelineStep.requiresDuplicateThumbnailReview` and `canRunStep()`.
+  /// This never runs any command and never touches the filesystem beyond
+  /// the read-only `Image.file` thumbnails inside the dialog.
+  Future<void> _openDedupReviewDialog() async {
+    final dryRunLog = _states['delete-dry-run']?.log ?? '';
+    setState(() {
+      _dedupReviewAcknowledged = true;
+    });
+    await showDialog<void>(
+      context: context,
+      builder: (context) =>
+          _DuplicateThumbnailReviewDialog(dryRunOutput: dryRunLog),
+    );
   }
 
   Future<void> _checkImmichConnection() async {
@@ -529,9 +583,23 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   state: _states[_selectedStep.id] ?? const StepRunState(),
                   canRun:
                       _runningStepId == null &&
-                      canRunStep(step: _selectedStep, states: _states),
+                      canRunStep(
+                        step: _selectedStep,
+                        states: _states,
+                        duplicateThumbnailReviewAcknowledged:
+                            _dedupReviewAcknowledged,
+                      ),
                   running: _runningStepId == _selectedStep.id,
                   onRun: _runSelectedStep,
+                  dryRunSucceeded: _selectedStep.requiresDryRunStepId == null
+                      ? true
+                      : _states[_selectedStep.requiresDryRunStepId]?.status ==
+                          PipelineStepStatus.succeeded,
+                  dedupReviewAcknowledged: _dedupReviewAcknowledged,
+                  dedupDryRunLog: _states['delete-dry-run']?.log,
+                  onOpenDedupReview: _selectedStep.requiresDuplicateThumbnailReview
+                      ? _openDedupReviewDialog
+                      : null,
                 ),
                 _AppMode.immich => _ImmichConnectionDetail(
                   serverUrlController: _immichUrlController,
@@ -2049,6 +2117,10 @@ class _StepDetail extends StatelessWidget {
     required this.canRun,
     required this.running,
     required this.onRun,
+    this.dryRunSucceeded = true,
+    this.dedupReviewAcknowledged = false,
+    this.dedupDryRunLog,
+    this.onOpenDedupReview,
   });
 
   final PipelineStep step;
@@ -2057,10 +2129,34 @@ class _StepDetail extends StatelessWidget {
   final bool running;
   final VoidCallback onRun;
 
+  /// Whether the dry-run step this step depends on (per
+  /// `requiresDryRunStepId`) has succeeded. Defaults to `true` for steps
+  /// with no dry-run dependency.
+  final bool dryRunSucceeded;
+
+  /// Whether the thumbnail-diff duplicate review (#49) has been shown for
+  /// the current dry-run output. Only meaningful when
+  /// `step.requiresDuplicateThumbnailReview` is true.
+  final bool dedupReviewAcknowledged;
+
+  /// The "delete-dry-run" step's captured stdout, used to show a pair
+  /// count / preview summary without opening the review dialog. Only read
+  /// when `step.requiresDuplicateThumbnailReview` is true.
+  final String? dedupDryRunLog;
+
+  /// Opens the thumbnail-diff review dialog. Non-null only when
+  /// `step.requiresDuplicateThumbnailReview` is true.
+  final VoidCallback? onOpenDedupReview;
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    final blockedReason = _blockedReason(step, canRun: canRun);
+    final blockedReason = _blockedReason(
+      step,
+      canRun: canRun,
+      dryRunSucceeded: dryRunSucceeded,
+      dedupReviewAcknowledged: dedupReviewAcknowledged,
+    );
     return Padding(
       padding: const EdgeInsets.all(24),
       child: Column(
@@ -2109,6 +2205,17 @@ class _StepDetail extends StatelessWidget {
               ),
             ],
           ),
+          if (step.requiresDuplicateThumbnailReview) ...[
+            const SizedBox(height: 16),
+            _DedupReviewPanel(
+              dryRunSucceeded: dryRunSucceeded,
+              acknowledged: dedupReviewAcknowledged,
+              pairCount: parseDuplicateDryRunOutput(
+                dedupDryRunLog ?? '',
+              ).pairs.length,
+              onOpenReview: onOpenDedupReview,
+            ),
+          ],
           if (blockedReason != null) ...[
             const SizedBox(height: 12),
             Text(
@@ -2192,12 +2299,24 @@ String _newChecklistId() {
   return DateTime.now().microsecondsSinceEpoch.toString();
 }
 
-String? _blockedReason(PipelineStep step, {required bool canRun}) {
+String? _blockedReason(
+  PipelineStep step, {
+  required bool canRun,
+  bool dryRunSucceeded = true,
+  bool dedupReviewAcknowledged = false,
+}) {
   if (step.linuxOnly && !Platform.isLinux) {
     return 'This step is enabled only on Linux or ChromeOS Linux in v1.';
   }
-  if (step.requiresDryRunStepId != null && !canRun) {
+  if (canRun || step.requiresDryRunStepId == null) {
+    return null;
+  }
+  if (!dryRunSucceeded) {
     return 'This confirm step is locked until its dry-run step succeeds in this app session.';
+  }
+  if (step.requiresDuplicateThumbnailReview && !dedupReviewAcknowledged) {
+    return 'This confirm step is locked until you review the duplicate-thumbnail '
+        'comparison below at least once.';
   }
   return null;
 }
@@ -2243,4 +2362,300 @@ String _failureTitle(ImmichConnectionIssue issue) {
     ImmichConnectionIssue.missingPermission => 'Missing permission',
     ImmichConnectionIssue.unexpectedResponse => 'Unexpected response',
   };
+}
+
+/// Inline summary + entry point for the thumbnail-diff duplicate review
+/// (#49), shown on the "delete-confirm" step's detail panel.
+class _DedupReviewPanel extends StatelessWidget {
+  const _DedupReviewPanel({
+    required this.dryRunSucceeded,
+    required this.acknowledged,
+    required this.pairCount,
+    required this.onOpenReview,
+  });
+
+  final bool dryRunSucceeded;
+  final bool acknowledged;
+  final int pairCount;
+  final VoidCallback? onOpenReview;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    final String message;
+    if (!dryRunSucceeded) {
+      message =
+          'Run "Review Duplicate Move Plan" successfully first to unlock the '
+          'thumbnail review.';
+    } else if (acknowledged) {
+      message =
+          'Reviewed for the current dry-run output ($pairCount proposed '
+          'pair${pairCount == 1 ? '' : 's'}). Re-run the dry-run step if the '
+          'duplicate set changes; re-review before confirming again.';
+    } else {
+      message =
+          'Before you can confirm, review side-by-side thumbnails of every '
+          'proposed keep/trash pair ($pairCount found, or a sample for '
+          'large runs) so you can trust the move plan without reading raw '
+          'Czkawka text output.';
+    }
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: acknowledged ? colorScheme.outlineVariant : colorScheme.error,
+        ),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  acknowledged ? Icons.check_circle : Icons.image_search,
+                  size: 18,
+                  color: acknowledged ? colorScheme.primary : colorScheme.error,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    acknowledged
+                        ? 'Duplicate thumbnail review: reviewed'
+                        : 'Duplicate thumbnail review required',
+                    style: textTheme.titleSmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(message, style: textTheme.bodySmall),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: dryRunSucceeded ? onOpenReview : null,
+              icon: const Icon(Icons.compare),
+              label: Text(
+                acknowledged
+                    ? 'Review Duplicate Thumbnails Again'
+                    : 'Review Duplicate Thumbnails',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Modal thumbnail-diff review for the "delete-dry-run" output (#49).
+///
+/// Parses the dry-run stdout with [parseDuplicateDryRunOutput] (never the
+/// bash script's own Czkawka-report parsing) and renders a sampled subset
+/// via [sampleDuplicateReviewPairs], always showing an honest "N of M"
+/// count so nothing is silently hidden from large runs.
+class _DuplicateThumbnailReviewDialog extends StatelessWidget {
+  const _DuplicateThumbnailReviewDialog({required this.dryRunOutput});
+
+  final String dryRunOutput;
+
+  @override
+  Widget build(BuildContext context) {
+    final parsed = parseDuplicateDryRunOutput(dryRunOutput);
+    final sample = sampleDuplicateReviewPairs(parsed.pairs);
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 640),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Review Duplicate Move Plan',
+                      style: textTheme.titleLarge,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                sample.totalPairs == 0
+                    ? 'No keep/trash pairs were found in the dry-run output.'
+                    : sample.isSampled
+                    ? 'Showing ${sample.shown.length} of ${sample.totalPairs} '
+                          'pairs — full list in the dry-run report.'
+                    : 'Showing all ${sample.totalPairs} '
+                          'pair${sample.totalPairs == 1 ? '' : 's'}.',
+                style: textTheme.bodySmall,
+              ),
+              if (parsed.orphanTrashLineCount > 0) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '${parsed.orphanTrashLineCount} "Would trash" line'
+                  '${parsed.orphanTrashLineCount == 1 ? '' : 's'} could not '
+                  'be matched to a kept file and are not shown here; open '
+                  'the dry-run report to inspect them.',
+                  style: textTheme.bodySmall?.copyWith(
+                    color: colorScheme.error,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Expanded(
+                child: sample.shown.isEmpty
+                    ? const Center(child: Text('Nothing to review.'))
+                    : ListView.separated(
+                        itemCount: sample.shown.length,
+                        separatorBuilder: (context, index) =>
+                            const Divider(height: 24),
+                        itemBuilder: (context, index) {
+                          return _DuplicateReviewPairRow(
+                            pair: sample.shown[index],
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DuplicateReviewPairRow extends StatelessWidget {
+  const _DuplicateReviewPairRow({required this.pair});
+
+  final DuplicateReviewPair pair;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: _DuplicateReviewThumbnail(
+            label: 'Keep',
+            path: pair.keepPath,
+            color: colorScheme.primary,
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 32),
+          child: Icon(Icons.arrow_forward),
+        ),
+        Expanded(
+          child: _DuplicateReviewThumbnail(
+            label: 'Would trash',
+            path: pair.trashPath,
+            color: colorScheme.error,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Renders one path in the review dialog: an `Image.file` preview for
+/// still-image formats, or a file icon + filename for video/unsupported
+/// formats (no video-thumbnail-generation dependency is added for this).
+class _DuplicateReviewThumbnail extends StatelessWidget {
+  const _DuplicateReviewThumbnail({
+    required this.label,
+    required this.path,
+    required this.color,
+  });
+
+  final String label;
+  final String path;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final fileName = duplicateReviewFileName(path);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(
+            context,
+          ).textTheme.labelSmall?.copyWith(color: color),
+        ),
+        const SizedBox(height: 4),
+        AspectRatio(
+          aspectRatio: 1,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(color: color),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: isDisplayableImagePath(path)
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.file(
+                      File(path),
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          _DuplicateReviewFileFallback(fileName: fileName),
+                    ),
+                  )
+                : _DuplicateReviewFileFallback(fileName: fileName),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          fileName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
+}
+
+class _DuplicateReviewFileFallback extends StatelessWidget {
+  const _DuplicateReviewFileFallback({required this.fileName});
+
+  final String fileName;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.insert_drive_file, size: 32),
+            const SizedBox(height: 4),
+            Text(
+              fileName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
