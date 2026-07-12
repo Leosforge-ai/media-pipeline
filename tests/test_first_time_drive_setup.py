@@ -640,6 +640,140 @@ class BootDiskExclusionTests(unittest.TestCase):
             self.assertEqual(result.stdout.count("\n"), 1, repr(result.stdout))
             self.assertEqual(result.stdout.strip(), "sda")
 
+
+class FilesystemTypeDetectionTests(unittest.TestCase):
+    # Regression tests for #57 bug 1: lsblk must be tried first (no root
+    # needed in the common case), with `sudo blkid` only as a fallback when
+    # lsblk has no answer -- and the fallback must announce itself before
+    # the sudo prompt can appear.
+
+    def test_lsblk_success_never_invokes_sudo_blkid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_dir = Path(tmp)
+            make_stub_bin(
+                stub_dir,
+                "lsblk",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "FSTYPE" ]]; then
+                      echo "ext4"
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            make_stub_bin(
+                stub_dir,
+                "sudo",
+                textwrap.dedent(
+                    """
+                    echo "SUDO_BLKID_CALLED" >&2
+                    exit 1
+                    """
+                ),
+            )
+            result = run_bash(
+                "detect_fstype /dev/sda1",
+                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "ext4")
+            self.assertNotIn("SUDO_BLKID_CALLED", result.stderr)
+
+    def test_falls_back_to_sudo_blkid_when_lsblk_has_no_answer(self):
+        # Regression for #57 bug 1: on at least one real system, unprivileged
+        # `blkid -o value -s TYPE` returned nothing for a valid ext4
+        # partition even though `sudo blkid` correctly reported it. lsblk is
+        # tried first; only when it comes back empty do we fall back to
+        # `sudo blkid`, and a heads-up is printed before that sudo call.
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_dir = Path(tmp)
+            make_stub_bin(
+                stub_dir,
+                "lsblk",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "FSTYPE" ]]; then
+                      echo ""
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            # `sudo` here just needs to delegate to the stubbed blkid below.
+            make_stub_bin(
+                stub_dir,
+                "sudo",
+                textwrap.dedent(
+                    """
+                    exec "$@"
+                    """
+                ),
+            )
+            make_stub_bin(
+                stub_dir,
+                "blkid",
+                textwrap.dedent(
+                    """
+                    if [[ "$*" == *"-s TYPE"* ]]; then
+                      echo "ext4"
+                      exit 0
+                    fi
+                    exit 0
+                    """
+                ),
+            )
+            result = run_bash(
+                "detect_fstype /dev/sda1",
+                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "ext4")
+            # The sudo heads-up must be printed before the fallback runs.
+            self.assertIn("may be prompted for your password", result.stderr)
+
+    def test_neither_lsblk_nor_sudo_blkid_finds_a_type_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_dir = Path(tmp)
+            make_stub_bin(
+                stub_dir,
+                "lsblk",
+                textwrap.dedent(
+                    """
+                    echo ""
+                    exit 0
+                    """
+                ),
+            )
+            make_stub_bin(
+                stub_dir,
+                "sudo",
+                textwrap.dedent(
+                    """
+                    exec "$@"
+                    """
+                ),
+            )
+            make_stub_bin(
+                stub_dir,
+                "blkid",
+                textwrap.dedent(
+                    """
+                    echo ""
+                    exit 0
+                    """
+                ),
+            )
+            result = run_bash(
+                "detect_fstype /dev/sda1",
+                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "")
+
+
 class FstabIdempotentAppendTests(unittest.TestCase):
     def test_append_writes_uuid_entry_with_nofail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -763,6 +897,13 @@ class FullScriptDetectionFlowTests(unittest.TestCase):
                   esac
                   exit 0
                 fi
+                if [[ "$1" == "-no" && "$2" == "FSTYPE" ]]; then
+                  # lsblk has no answer here (mirrors the real-world #57
+                  # report), forcing detect_fstype to fall back to the
+                  # stubbed `sudo blkid` below.
+                  echo ""
+                  exit 0
+                fi
                 if [[ "$*" == *"-P"* ]]; then
                   cat <<'LSBLK'
                 NAME="sda" SIZE="256000000000" TYPE="disk" MOUNTPOINT="" FSTYPE="" PKNAME=""
@@ -791,6 +932,15 @@ class FullScriptDetectionFlowTests(unittest.TestCase):
                   exit 0
                 fi
                 exit 0
+                """
+            ),
+        )
+        make_stub_bin(
+            stub_dir,
+            "sudo",
+            textwrap.dedent(
+                """
+                exec "$@"
                 """
             ),
         )
