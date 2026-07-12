@@ -240,3 +240,79 @@ List<PipelineStep> buildPipelineSteps() {
     ),
   ];
 }
+
+/// Step IDs chained automatically by the "guided run" consolidated mode, in
+/// run order. This intentionally excludes every `PipelineRisk.confirmRequired`
+/// step — those always require a separate, explicit, human-triggered action
+/// and must never be reachable from the automatic chain.
+///
+/// The guided run still pauses at two real decision points even though the
+/// next guided step is not itself confirm-gated: see
+/// [guidedRunCheckpointStepIds].
+const List<String> guidedRunStepIds = [
+  'check-system',
+  'setup-dependencies',
+  'configure-rclone',
+  'stitch-metadata',
+  'scan-duplicates',
+  'delete-dry-run',
+  'verify-cleanup',
+  'sync-immich',
+];
+
+/// Step IDs after which the guided run must stop and wait for an explicit
+/// human action before continuing, even on success.
+///
+/// - `delete-dry-run`: pause here so a human can review the dedup dry-run
+///   report before anyone runs `06_delete_duplicates.sh --confirm`.
+/// - `sync-immich`: pause here so a human can review the synced library
+///   before triggering an Immich rescan.
+const Set<String> guidedRunCheckpointStepIds = {
+  'delete-dry-run',
+  'sync-immich',
+};
+
+/// Returns the ordered [PipelineStep]s that make up the guided run's
+/// automatic chain, resolved from [buildPipelineSteps].
+///
+/// Throws a [StateError] if a referenced step is missing or if any resolved
+/// step is `PipelineRisk.confirmRequired` — that would violate the
+/// confirm-gate safety invariant, so this fails loudly instead of silently
+/// auto-triggering a destructive confirm step.
+List<PipelineStep> buildGuidedRunSteps() {
+  final byId = {for (final step in buildPipelineSteps()) step.id: step};
+  return [for (final id in guidedRunStepIds) _resolveGuidedStep(byId, id)];
+}
+
+PipelineStep _resolveGuidedStep(Map<String, PipelineStep> byId, String id) {
+  final step = byId[id];
+  if (step == null) {
+    throw StateError('Guided run references unknown step id "$id".');
+  }
+  if (step.risk == PipelineRisk.confirmRequired) {
+    throw StateError(
+      'Guided run must never include confirm-gated step "$id".',
+    );
+  }
+  return step;
+}
+
+/// Splits [guidedRunStepIds] into ordered segments, breaking after each ID in
+/// [guidedRunCheckpointStepIds]. The guided run executes one segment at a
+/// time and stops between segments for the human checkpoints described
+/// there.
+List<List<String>> buildGuidedRunSegments() {
+  final segments = <List<String>>[];
+  var current = <String>[];
+  for (final id in guidedRunStepIds) {
+    current.add(id);
+    if (guidedRunCheckpointStepIds.contains(id)) {
+      segments.add(List.unmodifiable(current));
+      current = [];
+    }
+  }
+  if (current.isNotEmpty) {
+    segments.add(List.unmodifiable(current));
+  }
+  return List.unmodifiable(segments);
+}
