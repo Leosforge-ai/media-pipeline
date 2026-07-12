@@ -6,7 +6,12 @@
 #
 # SAFETY NOTICE
 # -------------
-# - Detection (lsblk/blkid/findmnt) is read-only and requires no root.
+# - Detection (lsblk/blkid/findmnt) is read-only. It's unprivileged in the
+#   common case (lsblk metadata), but may fall back to `sudo blkid` if lsblk
+#   can't determine a filesystem type -- always announced before it happens,
+#   never silent. Read-only inspection like this is not subject to the
+#   print-don't-execute rule below, which is specifically about actions that
+#   change system state.
 # - This script NEVER runs mount, apt-get, or edits /etc/fstab without an
 #   explicit interactive y/n confirmation from the person running it.
 # - This script NEVER formats or partitions a drive.
@@ -60,6 +65,38 @@ fs_required_package() {
 	esac
 }
 
+# detect_fstype DEVICE
+# Detects the filesystem type of DEVICE, trying the unprivileged path first.
+# `lsblk -no FSTYPE` reads cached sysfs/udev metadata, which is typically
+# world-readable, so it usually works for an unprivileged user with no sudo
+# prompt at all. Only if that comes back empty do we fall back to
+# `sudo blkid`, which probes the device directly and reliably knows the type
+# even when lsblk's cached metadata is empty/stale for a given system (see
+# #57: `blkid -o value -s TYPE` without root returned nothing on a real
+# machine even though the partition was a valid, already-populated ext4
+# filesystem). This is a read-only detection query, not a mount/fstab/install
+# action, so it doesn't need a separate print-then-confirm step -- but since
+# it may trigger an unexpected sudo password prompt, we print a heads-up
+# first so it's never a surprise mid-run. Echoes the detected FSTYPE, or
+# nothing if neither method could determine it.
+detect_fstype() {
+	local device="$1"
+	local fstype
+
+	fstype="$(lsblk -d -no FSTYPE "$device" 2>/dev/null || true)"
+	fstype="${fstype%%$'\n'*}"
+	if [[ -n "$fstype" ]]; then
+		printf '%s\n' "$fstype"
+		return 0
+	fi
+
+	echo "==> Could not detect the filesystem type for $device without root (lsblk had no answer); falling back to 'sudo blkid $device' -- you may be prompted for your password now." >&2
+
+	fstype="$(sudo blkid -o value -s TYPE "$device" 2>/dev/null || true)"
+	fstype="${fstype%%$'\n'*}"
+	printf '%s\n' "$fstype"
+}
+
 # build_mount_commands DEVICE FSTYPE MOUNT_POINT
 # Prints the exact shell commands (one per line) the user should run to
 # install any required package and mount DEVICE at MOUNT_POINT. Prints
@@ -104,13 +141,29 @@ disk_name_from_partition() {
 
 	while true; do
 		name="$(basename "$current")"
-		type="$(lsblk -no TYPE "$current" 2>/dev/null || true)"
+		# -d/--nodeps is required here: without it, lsblk given a
+		# whole-disk device (e.g. /dev/nvme0n1) also lists that disk's
+		# children (partitions), so `-no TYPE`/`-no PKNAME` return one
+		# line per child in addition to the disk's own line. That
+		# multi-line output was then being treated as a single value by
+		# the `[[ "$type" == "disk" ]]` compare and `current="/dev/$pk"`
+		# concatenation below, producing a malformed, embedded-newline,
+		# duplicated device "path" that corrupted every later iteration
+		# and ultimately this function's own stdout (observed live as
+		# `root_boot_disk` returning "\nnvme0n1\nnvme0n1" instead of
+		# "nvme0n1" -- see #57). -d restricts each query to exactly the
+		# one device passed in, so type/pk are always a single value.
+		# The first-line extraction below is kept as a defensive second
+		# layer in case any lsblk/stub still returns extra lines.
+		type="$(lsblk -d -no TYPE "$current" 2>/dev/null || true)"
+		type="${type%%$'\n'*}"
 		if [[ "$type" == "disk" ]]; then
 			printf '%s\n' "$name"
 			return 0
 		fi
 
-		pk="$(lsblk -no PKNAME "$current" 2>/dev/null || true)"
+		pk="$(lsblk -d -no PKNAME "$current" 2>/dev/null || true)"
+		pk="${pk%%$'\n'*}"
 		if [[ -z "$pk" ]]; then
 			printf '%s\n' "$name"
 			return 0
@@ -315,7 +368,7 @@ main() {
 	local i=1 dev fstype
 	for name in "${candidates[@]}"; do
 		dev="/dev/$name"
-		fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
+		fstype="$(detect_fstype "$dev")"
 		printf '  [%d] %s  filesystem=%s\n' "$i" "$dev" "${fstype:-unknown}"
 		idx_to_device[$i]="$dev"
 		idx_to_fstype[$i]="$fstype"
