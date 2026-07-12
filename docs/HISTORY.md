@@ -35,15 +35,22 @@ so no uv migration.
 
 **Context:** Manually kicking off and reviewing ~7 separate steps for a single "clean and
 import" run was the top pipeline-usability complaint (#48). Every step, including the fully
-safe ones (system check, dependency setup, metadata stitching, duplicate scan, dry-run
-report, cleanup verification, Immich sync), required its own manual trigger.
+safe ones (system check, metadata stitching, duplicate scan, dry-run report, cleanup
+verification, Immich sync), required its own manual trigger.
 **Decisions:** Added a "guided run" consolidated mode alongside the existing per-step manual
 mode (not replacing it). `pipeline_models.dart` defines `guidedRunStepIds` (the chain: system
-check → dependency setup → rclone config → metadata stitch → duplicate scan → dedup dry-run →
-cleanup verify → Immich sync) and `guidedRunCheckpointStepIds` (`delete-dry-run`,
-`sync-immich`), with `buildGuidedRunSteps()`/`buildGuidedRunSegments()` resolving and
+check → metadata stitch → duplicate scan → dedup dry-run → cleanup verify → Immich sync) and
+`guidedRunCheckpointStepIds` (`delete-dry-run`, `sync-immich`), with
+`buildGuidedRunSteps()`/`buildGuidedRunSegments()` resolving and
 segmenting the chain — throwing if a confirm-gated step is ever included, as defense in
-depth. `pipeline_runner.dart` adds `GuidedRunController`, which runs one segment at a time,
+depth; `media_pipeline_app.dart` calls `buildGuidedRunSteps()` (not just
+`buildGuidedRunSegments()`) so that check runs live in the app, not only in tests.
+Interactive/privileged one-time setup steps (`setup-dependencies`: `sudo` calls;
+`configure-rclone`: interactive `rclone config` wizard on stdin/stdout, which
+`PipelineRunner.run()` can't service since it closes child stdin whenever a step has no
+`stdinText`) are excluded from the automatic chain for the same reason `setup-immich` /
+`verify-immich` already were — they stay manual-only. `pipeline_runner.dart` adds
+`GuidedRunController`, which runs one segment at a time,
 stops immediately on any step failure, and refuses to execute a `PipelineRisk.confirmRequired`
 step under any circumstance. The guided run therefore always stops before
 `06_delete_duplicates.sh --confirm` and before an Immich rescan — those remain explicit,
