@@ -104,13 +104,29 @@ disk_name_from_partition() {
 
 	while true; do
 		name="$(basename "$current")"
-		type="$(lsblk -no TYPE "$current" 2>/dev/null || true)"
+		# -d/--nodeps is required here: without it, lsblk given a
+		# whole-disk device (e.g. /dev/nvme0n1) also lists that disk's
+		# children (partitions), so `-no TYPE`/`-no PKNAME` return one
+		# line per child in addition to the disk's own line. That
+		# multi-line output was then being treated as a single value by
+		# the `[[ "$type" == "disk" ]]` compare and `current="/dev/$pk"`
+		# concatenation below, producing a malformed, embedded-newline,
+		# duplicated device "path" that corrupted every later iteration
+		# and ultimately this function's own stdout (observed live as
+		# `root_boot_disk` returning "\nnvme0n1\nnvme0n1" instead of
+		# "nvme0n1" -- see #57). -d restricts each query to exactly the
+		# one device passed in, so type/pk are always a single value.
+		# The first-line extraction below is kept as a defensive second
+		# layer in case any lsblk/stub still returns extra lines.
+		type="$(lsblk -d -no TYPE "$current" 2>/dev/null || true)"
+		type="${type%%$'\n'*}"
 		if [[ "$type" == "disk" ]]; then
 			printf '%s\n' "$name"
 			return 0
 		fi
 
-		pk="$(lsblk -no PKNAME "$current" 2>/dev/null || true)"
+		pk="$(lsblk -d -no PKNAME "$current" 2>/dev/null || true)"
+		pk="${pk%%$'\n'*}"
 		if [[ -z "$pk" ]]; then
 			printf '%s\n' "$name"
 			return 0
