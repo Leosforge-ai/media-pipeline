@@ -94,6 +94,34 @@ class FsTypeMountCommandMappingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("REAL MOUNT CALLED", result.stdout)
 
+    def test_mount_point_with_spaces_is_quoted_and_safe_to_eval(self):
+        # A HD_PATH containing spaces must survive a copy-paste/eval of the
+        # printed command as a single argument, not split into two.
+        mount_point = "/mnt/My External Drive"
+        result = run_bash(
+            textwrap.dedent(
+                f"""
+                cmds="$(build_mount_commands /dev/sdb1 ext4 '{mount_point}')"
+                echo "$cmds"
+                echo "---"
+                mkdir() {{ echo "mkdir got $# args: $*"; }}
+                export -f mkdir
+                mount() {{ echo "mount got $# args: $*"; }}
+                export -f mount
+                sudo() {{ "$@"; }}
+                export -f sudo
+                while IFS= read -r cmd; do
+                  eval "$cmd"
+                done <<<"$cmds"
+                """
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # 2/4 args (not more) proves the mount point survived as one word,
+        # not split on its embedded spaces.
+        self.assertIn(f"mkdir got 2 args: -p {mount_point}", result.stdout)
+        self.assertIn(f"mount got 4 args: -t ext4 /dev/sdb1 {mount_point}", result.stdout)
+
 
 class BootDiskExclusionTests(unittest.TestCase):
     def test_excludes_partitions_on_the_boot_disk(self):
@@ -202,6 +230,170 @@ class BootDiskExclusionTests(unittest.TestCase):
                 "lsblk",
                 textwrap.dedent(
                     """
+                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
+                      case "$3" in
+                        /dev/sda2) echo "sda" ;;
+                        *) echo "" ;;
+                      esac
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            result = run_bash(
+                "root_boot_disk",
+                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "sda")
+
+    def test_root_boot_disk_walks_lvm_chain_to_top_level_disk(self):
+        # Regression for the Cody MEDIUM finding on PR #56: an LVM root
+        # (`findmnt /` -> /dev/mapper/vg-root) must resolve all the way to
+        # the top-level whole disk (sda), not stop at the intermediate
+        # physical-volume partition (sda1) it happens to sit on. Stopping at
+        # sda1 would let a sibling partition on the same physical disk
+        # (sda2) slip past the boot-disk exclusion filter.
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_dir = Path(tmp)
+            make_stub_bin(
+                stub_dir,
+                "findmnt",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "/" ]]; then
+                      echo "/dev/mapper/vg-root"
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            make_stub_bin(
+                stub_dir,
+                "lsblk",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
+                      case "$3" in
+                        /dev/mapper/vg-root) echo "lvm" ;;
+                        /dev/sda1) echo "part" ;;
+                        /dev/sda) echo "disk" ;;
+                        *) echo "" ;;
+                      esac
+                      exit 0
+                    fi
+                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
+                      case "$3" in
+                        /dev/mapper/vg-root) echo "sda1" ;;
+                        /dev/sda1) echo "sda" ;;
+                        *) echo "" ;;
+                      esac
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            result = run_bash(
+                "root_boot_disk",
+                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "sda")
+
+    def test_lvm_root_excludes_sibling_partition_on_same_physical_disk(self):
+        # End-to-end version of the LVM regression: given the boot disk
+        # resolved from an LVM root (sda, via /dev/mapper/vg-root -> sda1 ->
+        # sda), a large unmounted sibling partition physically on sda
+        # (sda2) must still be excluded from candidates -- it must NOT be
+        # offered as a mountable drive just because only sda1 was recorded
+        # as "the boot disk".
+        boot_disk = "sda"  # what root_boot_disk should resolve to for this LVM setup
+        lsblk_output = "\n".join(
+            [
+                'NAME="sda" SIZE="2000000000000" TYPE="disk" MOUNTPOINT="" FSTYPE="" PKNAME=""',
+                'NAME="sda1" SIZE="500000000000" TYPE="part" MOUNTPOINT="" FSTYPE="LVM2_member" PKNAME="sda"',
+                'NAME="sda2" SIZE="900000000000" TYPE="part" MOUNTPOINT="" FSTYPE="ext4" PKNAME="sda"',
+                "",
+            ]
+        )
+        result = run_bash(
+            f'list_candidate_partitions {boot_disk} 500000000000',
+            input_text=lsblk_output,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_disk_name_from_partition_strips_btrfs_subvolume_bracket_suffix(self):
+        # Regression for the Cody MEDIUM finding: findmnt reports btrfs
+        # subvolume roots as e.g. "/dev/sda2[/@]". The bracketed suffix must
+        # be stripped before resolving the device, not left in place where
+        # lsblk can't find any matching device and the exclusion silently
+        # breaks.
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_dir = Path(tmp)
+            make_stub_bin(
+                stub_dir,
+                "lsblk",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
+                      case "$3" in
+                        /dev/sda2) echo "part" ;;
+                        /dev/sda) echo "disk" ;;
+                        *) echo "" ;;
+                      esac
+                      exit 0
+                    fi
+                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
+                      case "$3" in
+                        /dev/sda2) echo "sda" ;;
+                        *) echo "" ;;
+                      esac
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            result = run_bash(
+                'disk_name_from_partition "/dev/sda2[/@]"',
+                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "sda")
+
+    def test_root_boot_disk_handles_btrfs_subvolume_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub_dir = Path(tmp)
+            make_stub_bin(
+                stub_dir,
+                "findmnt",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "/" ]]; then
+                      echo "/dev/sda2[/@]"
+                      exit 0
+                    fi
+                    exit 1
+                    """
+                ),
+            )
+            make_stub_bin(
+                stub_dir,
+                "lsblk",
+                textwrap.dedent(
+                    """
+                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
+                      case "$3" in
+                        /dev/sda2) echo "part" ;;
+                        /dev/sda) echo "disk" ;;
+                        *) echo "" ;;
+                      esac
+                      exit 0
+                    fi
                     if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
                       case "$3" in
                         /dev/sda2) echo "sda" ;;
