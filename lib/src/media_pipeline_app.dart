@@ -70,6 +70,17 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   final List<PipelineStep> _steps = buildPipelineSteps();
   final Map<String, StepRunState> _states = {};
   late final PipelineRunner _runner;
+  late final GuidedRunController _guidedRunController;
+  // Resolved via buildGuidedRunSteps(), which throws if the chain ever
+  // includes a PipelineRisk.confirmRequired step. Looking guided-run steps
+  // up through this map (instead of _steps directly) keeps that safety
+  // check live in the running app, not just exercised by tests that call
+  // buildGuidedRunSteps() in isolation.
+  late final Map<String, PipelineStep> _guidedRunStepsById;
+  late final List<List<String>> _guidedSegments;
+  int _guidedSegmentIndex = 0;
+  bool _guidedRunning = false;
+  GuidedRunResult? _guidedLastResult;
   late final ImmichApiClient _immichClient;
   late final ImmichChecklistStore _checklistStore;
   late final TextEditingController _hdPathController;
@@ -93,6 +104,11 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     super.initState();
     _settings = PipelineSettings.defaults();
     _runner = PipelineRunner(workingDirectory: Directory.current.path);
+    _guidedRunController = GuidedRunController(runner: _runner);
+    _guidedRunStepsById = {
+      for (final step in buildGuidedRunSteps()) step.id: step,
+    };
+    _guidedSegments = buildGuidedRunSegments();
     _immichClient = widget.immichClient ?? ImmichApiClient();
     _checklistStore = widget.checklistStore ?? ImmichChecklistStore();
     _hdPathController = TextEditingController(text: _settings.hdPath);
@@ -227,6 +243,150 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     });
   }
 
+  /// Resolves a guided-run step id via [_guidedRunStepsById] (built from
+  /// [buildGuidedRunSteps]) rather than [_steps] directly, so every guided
+  /// step the app actually runs has passed that function's confirm-gate
+  /// safety check.
+  PipelineStep _guidedStepById(String id) {
+    final step = _guidedRunStepsById[id];
+    if (step == null) {
+      throw StateError(
+        'Guided run segment references step id "$id" that is not part of '
+        'the validated guided run chain.',
+      );
+    }
+    return step;
+  }
+
+  bool get _guidedRunFinished => _guidedSegmentIndex >= _guidedSegments.length;
+
+  bool get _canRunNextGuidedSegment {
+    if (_guidedRunning || _runningStepId != null || _guidedRunFinished) {
+      return false;
+    }
+    return _guidedSegments[_guidedSegmentIndex]
+        .map(_guidedStepById)
+        .every(isStepSupportedOnCurrentPlatform);
+  }
+
+  String get _guidedRunButtonLabel {
+    if (_guidedRunFinished) {
+      return 'Guided Run Complete';
+    }
+    return _guidedSegmentIndex == 0 ? 'Run Guided Pipeline' : 'Continue Guided Run';
+  }
+
+  String get _guidedRunStatusMessage {
+    if (_guidedRunning) {
+      return 'Guided run in progress…';
+    }
+
+    final lastResult = _guidedLastResult;
+    if (lastResult == null) {
+      return 'Chains the safe/review steps (system check through duplicate '
+          'scan, the dedup dry-run, cleanup verification, and Immich sync) '
+          'automatically. It always stops before "Move Duplicates To Trash" '
+          'and before an Immich rescan for an explicit manual step.';
+    }
+
+    if (lastResult.outcome == GuidedRunOutcome.stepFailed) {
+      return 'Guided run stopped: "${lastResult.failedStepId}" failed '
+          '(exit ${lastResult.failedExitCode}). Review its log, fix the '
+          'issue, then run this segment again.';
+    }
+
+    if (lastResult.outcome == GuidedRunOutcome.aborted) {
+      return 'Guided run was cancelled before finishing this segment.';
+    }
+
+    // outcome == completed
+    if (_guidedRunFinished) {
+      return 'Guided run finished through the Immich library sync. Review '
+          'it, then continue manually with the Immich rescan / setup and '
+          'verification steps in the list.';
+    }
+
+    final justFinishedCheckpoint = _guidedSegments[_guidedSegmentIndex - 1].last;
+    if (justFinishedCheckpoint == 'delete-dry-run') {
+      return 'Checkpoint reached: review the duplicate move plan in the '
+          '"Review Duplicate Move Plan" step\'s output. Manually run "Move '
+          'Duplicates To Trash" if you want to delete, or skip it — then '
+          'continue the guided run.';
+    }
+    return 'Guided run segment finished. Continue when ready.';
+  }
+
+  Future<void> _runNextGuidedSegment() async {
+    if (!_canRunNextGuidedSegment) {
+      return;
+    }
+
+    final segmentStepIds = _guidedSegments[_guidedSegmentIndex];
+    final segmentSteps = segmentStepIds.map(_guidedStepById).toList();
+
+    setState(() {
+      _settings = _settings.copyWith(
+        hdPath: _hdPathController.text.trim(),
+        reportDir: _reportDirController.text.trim(),
+      );
+      _guidedRunning = true;
+    });
+
+    final result = await _guidedRunController.run(
+      steps: segmentSteps,
+      settings: _settings,
+      onStepStart: (step) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _runningStepId = step.id;
+          _states[step.id] = const StepRunState(
+            status: PipelineStepStatus.running,
+          );
+        });
+      },
+      onStepComplete: (step, stepResult) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _runningStepId = null;
+          _states[step.id] = (_states[step.id] ?? const StepRunState())
+              .copyWith(
+                status: stepResult.succeeded
+                    ? PipelineStepStatus.succeeded
+                    : PipelineStepStatus.failed,
+                exitCode: stepResult.exitCode,
+                log: stepResult.output,
+              );
+        });
+      },
+      onLog: (chunk) {
+        final currentStepId = _runningStepId;
+        if (!mounted || currentStepId == null) {
+          return;
+        }
+        setState(() {
+          final current = _states[currentStepId] ?? const StepRunState();
+          _states[currentStepId] = current.copyWith(log: current.log + chunk);
+        });
+      },
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _guidedRunning = false;
+      _guidedLastResult = result;
+      if (result.outcome == GuidedRunOutcome.completed) {
+        _guidedSegmentIndex += 1;
+      }
+    });
+  }
+
   Future<void> _checkImmichConnection() async {
     if (_checkingImmich) {
       return;
@@ -329,15 +489,27 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                       child: switch (_mode) {
                         _AppMode.workflow => ListView.builder(
                           padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-                          itemCount: _steps.length,
+                          // +1: a leading guided-run control card ahead of
+                          // the per-step list, kept inside this scrollable
+                          // region so it can never overflow the sidebar.
+                          itemCount: _steps.length + 1,
                           itemBuilder: (context, index) {
-                            final step = _steps[index];
+                            if (index == 0) {
+                              return _GuidedRunPanel(
+                                buttonLabel: _guidedRunButtonLabel,
+                                statusMessage: _guidedRunStatusMessage,
+                                enabled: _canRunNextGuidedSegment,
+                                running: _guidedRunning,
+                                onRun: _runNextGuidedSegment,
+                              );
+                            }
+                            final step = _steps[index - 1];
                             return _StepTile(
                               step: step,
                               state: _states[step.id] ?? const StepRunState(),
-                              selected: index == _selectedIndex,
+                              selected: (index - 1) == _selectedIndex,
                               onTap: () =>
-                                  setState(() => _selectedIndex = index),
+                                  setState(() => _selectedIndex = index - 1),
                             );
                           },
                         ),
@@ -1729,6 +1901,62 @@ class _AppHeader extends StatelessWidget {
             style: textTheme.bodySmall,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _GuidedRunPanel extends StatelessWidget {
+  const _GuidedRunPanel({
+    required this.buttonLabel,
+    required this.statusMessage,
+    required this.enabled,
+    required this.running,
+    required this.onRun,
+  });
+
+  final String buttonLabel;
+  final String statusMessage;
+  final bool enabled;
+  final bool running;
+  final VoidCallback onRun;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: colorScheme.outlineVariant),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.playlist_add_check, size: 18),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text('Guided Run', style: textTheme.titleSmall),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(statusMessage, style: textTheme.bodySmall),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: enabled ? onRun : null,
+                icon: Icon(running ? Icons.hourglass_top : Icons.fast_forward),
+                label: Text(running ? 'Running…' : buttonLabel),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

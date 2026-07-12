@@ -30,3 +30,36 @@ so no uv migration.
 **Context:** Formally bring the repository under company-os governance.
 **Decisions:** Added `.company/` project context and aligned repo with company-wide operating standards.
 **Outcome:** Repo is officially registered and governed by company-os.
+
+## Phase 3 — Guided pipeline run (2026-07-12)
+
+**Context:** Manually kicking off and reviewing ~7 separate steps for a single "clean and
+import" run was the top pipeline-usability complaint (#48). Every step, including the fully
+safe ones (system check, metadata stitching, duplicate scan, dry-run report, cleanup
+verification, Immich sync), required its own manual trigger.
+**Decisions:** Added a "guided run" consolidated mode alongside the existing per-step manual
+mode (not replacing it). `pipeline_models.dart` defines `guidedRunStepIds` (the chain: system
+check → metadata stitch → duplicate scan → dedup dry-run → cleanup verify → Immich sync) and
+`guidedRunCheckpointStepIds` (`delete-dry-run`, `sync-immich`), with
+`buildGuidedRunSteps()`/`buildGuidedRunSegments()` resolving and
+segmenting the chain — throwing if a confirm-gated step is ever included, as defense in
+depth; `media_pipeline_app.dart` calls `buildGuidedRunSteps()` (not just
+`buildGuidedRunSegments()`) so that check runs live in the app, not only in tests.
+Interactive/privileged one-time setup steps (`setup-dependencies`: `sudo` calls;
+`configure-rclone`: interactive `rclone config` wizard on stdin/stdout, which
+`PipelineRunner.run()` can't service since it closes child stdin whenever a step has no
+`stdinText`) are excluded from the automatic chain for the same reason `setup-immich` /
+`verify-immich` already were — they stay manual-only. `pipeline_runner.dart` adds
+`GuidedRunController`, which runs one segment at a time,
+stops immediately on any step failure, and refuses to execute a `PipelineRisk.confirmRequired`
+step under any circumstance. The guided run therefore always stops before
+`06_delete_duplicates.sh --confirm` and before an Immich rescan — those remain explicit,
+separate, human-triggered actions via the unchanged manual step list. The Flutter UI adds a
+"Guided Run" control card ahead of the per-step list, sharing the same `StepRunState`/log
+plumbing as manual runs.
+**Pivots:** None — the two real decision points named in #48 map directly onto
+`guidedRunCheckpointStepIds`, so no design change was needed mid-implementation.
+**Outcome:** Guided run reduces a full clean-and-import pass to two manual checkpoints
+(dedup delete confirmation, Immich rescan trigger) instead of ~7 separate manual triggers,
+while the confirm-gate safety invariant (`PipelineRisk.confirmRequired` steps always require
+a separate explicit human action) is unchanged and covered by new automated tests.

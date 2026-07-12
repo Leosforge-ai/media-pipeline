@@ -67,4 +67,92 @@ void main() {
     expect(step.requiredTools, contains('sha256sum'));
     expect(step.requiresDryRunStepId, isNull);
   });
+
+  group('guided run chain', () {
+    test('never includes a confirm-gated step id', () {
+      final confirmRequiredIds = buildPipelineSteps()
+          .where((step) => step.risk == PipelineRisk.confirmRequired)
+          .map((step) => step.id)
+          .toSet();
+
+      // Explicitly assert the two known confirm-gated steps are excluded,
+      // not just "no overlap" — this is the safety invariant from #48.
+      expect(guidedRunStepIds, isNot(contains('delete-confirm')));
+      expect(guidedRunStepIds, isNot(contains('restore-confirm')));
+      expect(
+        guidedRunStepIds.toSet().intersection(confirmRequiredIds),
+        isEmpty,
+      );
+    });
+
+    test(
+      'never includes interactive or privileged setup steps that would '
+      'hang or fail unattended',
+      () {
+        // setup-dependencies (01) runs sudo calls; configure-rclone (02)
+        // runs the interactive `rclone config` wizard on stdin/stdout, and
+        // PipelineRunner.run() closes child stdin immediately when a step
+        // has no stdinText — so either step would hang or error if it were
+        // ever auto-chained. Both stay manual-only, like setup-immich /
+        // verify-immich already are.
+        expect(guidedRunStepIds, isNot(contains('setup-dependencies')));
+        expect(guidedRunStepIds, isNot(contains('configure-rclone')));
+        expect(guidedRunStepIds, isNot(contains('setup-immich')));
+        expect(guidedRunStepIds, isNot(contains('verify-immich')));
+      },
+    );
+
+    test('buildGuidedRunSteps resolves steps in the declared order and '
+        'none are confirm-gated', () {
+      final steps = buildGuidedRunSteps();
+
+      expect(
+        steps.map((step) => step.id).toList(),
+        guidedRunStepIds,
+      );
+      expect(
+        steps.every((step) => step.risk != PipelineRisk.confirmRequired),
+        isTrue,
+      );
+    });
+
+    test('checkpoint ids are the dedup dry-run and Immich sync steps', () {
+      expect(guidedRunCheckpointStepIds, {'delete-dry-run', 'sync-immich'});
+    });
+
+    test('buildGuidedRunSegments stops each segment at a checkpoint step', () {
+      final segments = buildGuidedRunSegments();
+
+      // Flattening the segments back out reproduces the full chain, in
+      // order, with nothing dropped or duplicated.
+      expect(segments.expand((segment) => segment).toList(), guidedRunStepIds);
+
+      // Every segment except possibly the last ends on a checkpoint step,
+      // and the checkpoint id only ever appears as a segment's last step.
+      for (final segment in segments) {
+        final last = segment.last;
+        final isCheckpointSegment = guidedRunCheckpointStepIds.contains(last);
+        final isFinalSegment = segment == segments.last;
+        expect(isCheckpointSegment || isFinalSegment, isTrue);
+        expect(
+          segment.sublist(0, segment.length - 1).any(
+                guidedRunCheckpointStepIds.contains,
+              ),
+          isFalse,
+        );
+      }
+
+      // The dedup dry-run checkpoint and the Immich sync checkpoint must
+      // each end their own segment, so a human must act before the guided
+      // run continues to delete-confirm or an Immich rescan.
+      expect(
+        segments.any((segment) => segment.last == 'delete-dry-run'),
+        isTrue,
+      );
+      expect(
+        segments.any((segment) => segment.last == 'sync-immich'),
+        isTrue,
+      );
+    });
+  });
 }

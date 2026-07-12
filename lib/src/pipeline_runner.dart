@@ -71,3 +71,94 @@ bool canRunStep({
   }
   return states[dryRunStepId]?.status == PipelineStepStatus.succeeded;
 }
+
+/// Why a [GuidedRunController.run] call ended.
+enum GuidedRunOutcome {
+  /// Every step in the requested segment finished successfully. If the
+  /// segment ended on a checkpoint step, the caller must still wait for the
+  /// separate human action before running the next segment.
+  completed,
+
+  /// A step exited non-zero. The guided run stops immediately; it never
+  /// continues to a later step (including any checkpoint step) after a
+  /// failure.
+  stepFailed,
+
+  /// The caller's `shouldAbort` callback returned true before a step ran.
+  aborted,
+}
+
+class GuidedRunResult {
+  const GuidedRunResult({
+    required this.outcome,
+    required this.completedStepIds,
+    this.failedStepId,
+    this.failedExitCode,
+  });
+
+  final GuidedRunOutcome outcome;
+  final List<String> completedStepIds;
+  final String? failedStepId;
+  final int? failedExitCode;
+}
+
+/// Runs a pre-resolved, ordered list of guided-run steps back-to-back with a
+/// single [PipelineRunner], with no human interaction between them.
+///
+/// Safety invariant: this must never be given (and will refuse to run) a
+/// step with `PipelineRisk.confirmRequired`. Confirm-gated steps
+/// (`06_delete_duplicates.sh --confirm`, `11_restore_from_trash.sh
+/// --confirm`) always require an explicit, separate, human-triggered action
+/// outside the guided chain — see `guidedRunStepIds` and
+/// `guidedRunCheckpointStepIds` in `pipeline_models.dart`, which are the
+/// intended source of the `steps` passed in here.
+class GuidedRunController {
+  const GuidedRunController({required this.runner});
+
+  final PipelineRunner runner;
+
+  Future<GuidedRunResult> run({
+    required List<PipelineStep> steps,
+    required PipelineSettings settings,
+    void Function(PipelineStep step)? onStepStart,
+    void Function(PipelineStep step, PipelineRunResult result)?
+    onStepComplete,
+    LogSink? onLog,
+    bool Function()? shouldAbort,
+  }) async {
+    final completed = <String>[];
+    for (final step in steps) {
+      if (step.risk == PipelineRisk.confirmRequired) {
+        throw StateError(
+          'GuidedRunController refuses to auto-run confirm-gated step '
+          '"${step.id}"; it requires an explicit separate human action.',
+        );
+      }
+      if (shouldAbort?.call() ?? false) {
+        return GuidedRunResult(
+          outcome: GuidedRunOutcome.aborted,
+          completedStepIds: completed,
+        );
+      }
+
+      onStepStart?.call(step);
+      final result = await runner.run(step, settings, onLog: onLog);
+      onStepComplete?.call(step, result);
+
+      if (!result.succeeded) {
+        return GuidedRunResult(
+          outcome: GuidedRunOutcome.stepFailed,
+          completedStepIds: completed,
+          failedStepId: step.id,
+          failedExitCode: result.exitCode,
+        );
+      }
+      completed.add(step.id);
+    }
+
+    return GuidedRunResult(
+      outcome: GuidedRunOutcome.completed,
+      completedStepIds: completed,
+    );
+  }
+}
