@@ -61,15 +61,26 @@ bool isStepSupportedOnCurrentPlatform(PipelineStep step) {
 bool canRunStep({
   required PipelineStep step,
   required Map<String, StepRunState> states,
+  // Fails closed: a step that opts into the thumbnail review gate
+  // (`requiresDuplicateThumbnailReview`) stays locked unless the caller
+  // explicitly asserts the review was shown. This is additive to the
+  // existing dry-run gate below, never a replacement for it — see
+  // `PipelineStep.requiresDuplicateThumbnailReview` (issue #49).
+  bool duplicateThumbnailReviewAcknowledged = false,
 }) {
   if (!isStepSupportedOnCurrentPlatform(step)) {
     return false;
   }
   final dryRunStepId = step.requiresDryRunStepId;
-  if (dryRunStepId == null) {
-    return true;
+  if (dryRunStepId != null &&
+      states[dryRunStepId]?.status != PipelineStepStatus.succeeded) {
+    return false;
   }
-  return states[dryRunStepId]?.status == PipelineStepStatus.succeeded;
+  if (step.requiresDuplicateThumbnailReview &&
+      !duplicateThumbnailReviewAcknowledged) {
+    return false;
+  }
+  return true;
 }
 
 /// Why a [GuidedRunController.run] call ended.

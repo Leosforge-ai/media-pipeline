@@ -61,6 +61,7 @@ class PipelineStep {
     this.requiredTools = const [],
     this.requiresDryRunStepId,
     this.linuxOnly = false,
+    this.requiresDuplicateThumbnailReview = false,
   });
 
   final String id;
@@ -71,6 +72,15 @@ class PipelineStep {
   final List<String> requiredTools;
   final String? requiresDryRunStepId;
   final bool linuxOnly;
+
+  /// Whether this step's gate (see [pipeline_runner.canRunStep]) also
+  /// requires that a human has viewed the thumbnail-diff duplicate review
+  /// screen (issue #49) for the current dry-run output, in addition to the
+  /// dry-run step referenced by [requiresDryRunStepId] having succeeded.
+  ///
+  /// This is additive to the existing dry-run gate, never a replacement for
+  /// it — see `canRunStep` in `pipeline_runner.dart`.
+  final bool requiresDuplicateThumbnailReview;
 
   bool get requiresPriorDryRun => requiresDryRunStepId != null;
 }
@@ -170,6 +180,7 @@ List<PipelineStep> buildPipelineSteps() {
         '--confirm',
       ]),
       requiresDryRunStepId: 'delete-dry-run',
+      requiresDuplicateThumbnailReview: true,
     ),
     PipelineStep(
       id: 'sync-immich',
