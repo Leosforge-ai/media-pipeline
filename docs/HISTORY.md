@@ -137,3 +137,44 @@ regression guard for a large unmounted partition that sits on the boot disk itse
 fstab-append against a temp file (never `/etc/fstab`), pipeline-structure verification, and two
 full end-to-end runs of the script with `lsblk`/`blkid`/`findmnt` stubbed on `PATH` proving
 quit/decline paths make zero filesystem changes. shellcheck/shfmt clean.
+
+## Phase 6 — First-time drive setup: real-machine fixes (2026-07-12)
+
+**Context:** The repo owner ran the just-merged `scripts/00b_first_time_drive_setup.sh`
+(Phase 5) against a real machine and hit two bugs (#57). Bug 1: unprivileged `blkid -o value
+-s TYPE` returned nothing for a real, valid ext4 partition even though `sudo blkid` correctly
+reported it, so the script showed `filesystem=unknown` and aborted when the partition was
+selected — unusable without a manual `sudo blkid` workaround. Bug 2: `root_boot_disk()`
+printed malformed, duplicated multi-line output (`"==> Boot/root disk detected as: \n
+nvme0n1\nnvme0n1 (always excluded from candidates)"` instead of a single clean line) — a
+fragility risk on the script's top safety property (boot-disk exclusion), even though
+exclusion still worked correctly in the reported case.
+**Root causes:** Bug 1 — `blkid` needs root to reliably probe raw block devices for
+filesystem type on at least some systems, and the script only ever tried the unprivileged
+path. Bug 2 — `disk_name_from_partition()`'s parent-chain walk (added by the Phase 5 LVM/btrfs
+fix) called `lsblk -no TYPE`/`-no PKNAME` on a device path without `-d`/`--nodeps`; for a
+whole-disk device with children (e.g. `/dev/nvme0n1` with partitions), lsblk without `-d`
+returns one line per child in addition to the disk's own line, and that multi-line string was
+then treated as a single value by a `[[ "$type" == "disk" ]]` compare and a
+`current="/dev/$pk"` concatenation — corrupting later loop iterations and the function's own
+final stdout.
+**Decisions:** Bug 2 fix landed first as the more foundational safety-property fix: added
+`-d`/`--nodeps` to both `lsblk` calls in `disk_name_from_partition()` so each query is always
+scoped to exactly one device, plus a defensive first-line truncation as a second layer. Bug 1
+fix: added `detect_fstype()`, a shared helper (replacing the single duplicated `blkid` call
+site that fed both the candidate-listing display and the cached mount-command-building path)
+that tries `lsblk -no FSTYPE` first (sysfs/udev metadata, typically world-readable, no root
+needed) and only falls back to `sudo blkid` if lsblk has no answer — printing a clear heads-up
+before the sudo prompt can appear so it's never a surprise mid-run. The `sudo blkid` fallback
+is a read-only detection query, not a mount/fstab/install action, so it remains exempt from
+the print-don't-execute rule, consistent with the fix direction in #57.
+**Pivots:** None — both fixes stayed within the read-only-detection / print-don't-execute
+boundary established in Phase 5; no change to the confirmation-gated mount/fstab actions.
+**Outcome:** `tests/test_first_time_drive_setup.py` grows from 18 to 39 tests. New coverage:
+three regression tests for `root_boot_disk()`'s single-line-output guarantee across the
+simple-partition, LVM-chain, and btrfs-subvolume scenarios (stubbing `lsblk` to reproduce the
+exact multi-line pollution that occurs when `-d` is dropped, proving the fix); three tests for
+`detect_fstype()` (lsblk success never invokes `sudo blkid`; the sudo-blkid fallback fires and
+announces itself only when lsblk is empty; neither method finding an answer returns empty);
+and the existing full-script end-to-end tests updated to stub `sudo`/`lsblk -no FSTYPE` so they
+exercise the same fallback path. shellcheck/shfmt clean.
