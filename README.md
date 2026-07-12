@@ -62,6 +62,21 @@ git clone <your-repo-url> media-pipeline
 cd media-pipeline
 
 ./scripts/00_check_system.sh
+```
+
+If the external drive isn't mounted yet (fresh machine, first run), run the
+first-time drive/Immich setup helper next. It detects unmounted candidate
+drives with `lsblk`/`blkid` (excluding the boot disk), and **prints, but never
+silently runs**, the exact mount/`fstab` commands for your drive's filesystem
+(ext4/ntfs/exfat) — you confirm each step interactively:
+
+```bash
+./scripts/00b_first_time_drive_setup.sh
+```
+
+Once the drive is mounted and its structure looks right, continue:
+
+```bash
 ./scripts/01_setup_dependencies.sh
 ```
 

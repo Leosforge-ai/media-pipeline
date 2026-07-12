@@ -106,3 +106,34 @@ dedicated test group in `test/pipeline_models_test.dart`, a real-script assertio
 (`test/dedup_review_widget_test.dart`) using a fake `PipelineRunner` seam
 (`MediaPipelineApp.runner`) that proves the confirm button stays disabled until the review
 dialog is opened, and that re-running the dry-run invalidates a prior acknowledgment.
+
+## Phase 5 — First-time drive/Immich setup detection (2026-07-12)
+
+**Context:** Getting from "drive shows up in `lsblk` with no mountpoint" to "Immich running"
+was fully manual (#55): identify filesystem with `blkid`, reason about which mount driver to
+use (ext4 vs `ntfs-3g` vs `exfat`), mount, verify contents, optionally persist via
+`/etc/fstab`, then chain into `09_setup_immich.sh`. This was the same class of pre-mount
+friction Phase 3's guided run already reduced for the post-mount pipeline.
+**Decisions:** Added `scripts/00b_first_time_drive_setup.sh`, a new numbered script (not a
+Flutter app change) that: (1) detects unmounted candidate partitions via `lsblk`/`blkid`,
+filtered to >500GB (override via `SIZE_THRESHOLD_BYTES`) and excluding whatever disk backs `/`
+(resolved via `findmnt / -no SOURCE` + `lsblk -no PKNAME`, so the boot disk can never be
+misidentified as a candidate); (2) prints, but never silently runs, the exact
+package-install/mount commands for the detected filesystem type (ext4/ext3/ext2 need no extra
+package; `ntfs` needs `ntfs-3g`; `exfat` needs `exfatprogs`) — running them requires an
+explicit interactive `y/n`; (3) offers an idempotent `/etc/fstab` append (checked via
+`UUID=...` grep, `nofail` in the entry so a missing drive doesn't hang boot) behind its own
+`y/n`, overridable via `FSTAB_PATH` for testing; (4) verifies the mounted path is writable and
+that `immich_library/` (if present) is actually a directory before suggesting
+`09_setup_immich.sh` — printing a warning and stopping otherwise, never auto-chaining. All
+detection logic (filesystem→mount-command mapping, boot-disk exclusion filter, fstab
+idempotency, structure verification) is factored into small functions guarded by a
+`BASH_SOURCE`/`$0` check so the script can be sourced by tests without running `main()`.
+**Pivots:** None — followed the print-don't-execute constraint from #55 as designed, so per
+the issue's own risk note this only needed Cody review, not Astrid.
+**Outcome:** `tests/test_first_time_drive_setup.py` adds 18 tests: pure-logic coverage of the
+fs-type→command mapping and boot-disk-exclusion filter (fed canned `lsblk -P` text, including a
+regression guard for a large unmounted partition that sits on the boot disk itself), idempotent
+fstab-append against a temp file (never `/etc/fstab`), pipeline-structure verification, and two
+full end-to-end runs of the script with `lsblk`/`blkid`/`findmnt` stubbed on `PATH` proving
+quit/decline paths make zero filesystem changes. shellcheck/shfmt clean.
