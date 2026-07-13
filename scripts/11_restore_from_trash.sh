@@ -28,4 +28,6 @@ find "$MEDIA_TRASH" -type f -print0 | while IFS= read -r -d '' f; do
 	fi
 done
 
-[[ "$DRY_RUN" -eq 1 ]] && echo "Dry-run only. Re-run with --confirm to restore."
+if [[ "$DRY_RUN" -eq 1 ]]; then
+	echo "Dry-run only. Re-run with --confirm to restore."
+fi

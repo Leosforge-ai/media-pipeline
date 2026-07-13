@@ -178,3 +178,45 @@ exact multi-line pollution that occurs when `-d` is dropped, proving the fix); t
 announces itself only when lsblk is empty; neither method finding an answer returns empty);
 and the existing full-script end-to-end tests updated to stub `sudo`/`lsblk -no FSTYPE` so they
 exercise the same fallback path. shellcheck/shfmt clean.
+
+## Phase 6 — Live Photo still+video dedupe (2026-07-12)
+
+**Context:** Google Takeout exports Apple Live Photos as two separate files with matching
+basenames — a still and a short (1-3s) motion clip. Immich imports them as two disconnected
+timeline assets instead of one Live Photo; this isn't caught by Immich's own CLIP-based
+duplicate review (a still and its motion clip aren't necessarily visually similar), and it's a
+different, structural problem from the localized `Fotos de YYYY` duplicates `12` already
+handles (#60).
+**Decisions:** Added `scripts/13_dedupe_live_photos.sh`, following `12`'s exact UX pattern
+(dry-run default, typed `--confirm` phrase gate). A still and video are only paired when they
+share a directory and basename, and the video's duration is verified via `ffprobe` (`<=5s`,
+chosen with margin above Apple's ~3s Live Photo capture window and the 1-3s clips this repo's
+own Takeout exports produced) — falling back to file-mtime proximity (`<=5s` apart) only when
+`ffprobe` can't report a duration at all (corrupt file/missing metadata), never as a substitute
+for a known-too-long duration. `ffprobe` is invoked via an overridable `$FFPROBE_BIN` so the
+test suite can inject a stub instead of depending on a real `ffprobe` binary or real encoded
+media on the test runner. Scans `$IMMICH_LIBRARY` by default (cleanup is typically discovered
+post-import); `LIVE_PHOTO_SCAN_DIR` overrides to `$CLEANING_STAGING` for a pre-sync run.
+Explicitly does not attempt to re-link the pair as a single Immich Live Photo asset (e.g.
+`QuickTime:ContentIdentifier`) — out of scope per #60, the still stays a plain photo.
+**Pivots:** Trash layout — the issue suggested reusing `12`'s timestamped `TRASH_BATCH`
+subdirectory under `$MEDIA_TRASH`. Tracing through `11_restore_from_trash.sh` (which
+reconstructs the original path by stripping only the `$MEDIA_TRASH/` prefix and prepending `/`)
+showed that pattern breaks restore: the batch directory survives as an extra path segment, so
+`11` would restore into a synthetic `/<batch-dir-name>/...` location instead of the real
+original path. `13` instead mirrors the full original absolute path directly under
+`$MEDIA_TRASH`, matching `06_delete_duplicates.sh`'s already-restore-compatible layout;
+`$RUN_TIMESTAMP` is still recorded in the summary and per-move log lines for batch
+identification. Verifying this round trip end-to-end (a real test now runs `13 --confirm` then
+`11_restore_from_trash.sh --confirm` and asserts the file lands back at its exact original
+path) also surfaced a real, previously-uncaught bug in `11`: its final statement,
+`[[ "$DRY_RUN" -eq 1 ]] && echo ...`, is a bare `set -e` script's last command, so in confirm
+mode (`DRY_RUN=0`) the false condition became the script's own exit code even on a fully
+successful restore — no prior test exercised `11 --confirm` end-to-end. Fixed by rewriting it
+as an explicit `if`/`fi`; no behavior change to what gets restored or printed.
+**Outcome:** `tests/test_shell_scripts.py` adds a `LivePhotoDedupeTests` class covering
+verified-pair dry-run output, rejection of an over-duration video, rejection when no paired
+still exists, the duration-unknown timestamp-proximity fallback (both the close-enough and
+too-far cases), the typed-confirmation gate, and the full confirm-then-restore round trip.
+`docs/IMMICH_HELP_LIBRARY.md`'s Takeout Duplicates section and `README.md`'s pipeline steps and
+Limitations sections document the new step. shellcheck/shfmt clean.

@@ -115,6 +115,12 @@ That cleanup script:
 
 Run the dry-run before or between Immich scans. After confirm mode, restart Immich and rescan `/library`.
 
+### Live Photo still+video pairs
+
+A related, structurally different variant: Google Takeout exports an Apple Live Photo as two separate files with a matching basename — a still (`.heic`/`.heif`/`.jpg`/`.jpeg`) and a short motion clip (`.mov`/`.mp4`, typically 1-3s). Immich imports them as two disconnected timeline assets. This isn't caught by Immich's own CLIP-based duplicate review, since a still frame and its paired motion video aren't necessarily visually similar — it's a basename-pairing problem, not a similarity problem.
+
+`13_dedupe_live_photos.sh` handles this: a still and video are only treated as a pair when they share a directory and basename, and the video's duration is verified via `ffprobe` to be at most 5 seconds (falling back to file-timestamp proximity only when `ffprobe` can't report a duration at all) — this rejects a same-basename video that's actually a real, unrelated multi-minute clip. It moves only the verified standalone motion video to `media_trash`, keeping the still. It does not attempt to re-link the still+video pair as a single Live Photo asset in Immich (e.g. writing `QuickTime:ContentIdentifier`); the still remains a plain, non-live photo. Defaults to scanning `immich_library`; set `LIVE_PHOTO_SCAN_DIR=$CLEANING_STAGING` to run it pre-sync instead.
+
 ## Memories
 
 Immich can show memories from server-side assets. The app's Memory Curator
