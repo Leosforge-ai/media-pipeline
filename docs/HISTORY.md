@@ -220,3 +220,35 @@ still exists, the duration-unknown timestamp-proximity fallback (both the close-
 too-far cases), the typed-confirmation gate, and the full confirm-then-restore round trip.
 `docs/IMMICH_HELP_LIBRARY.md`'s Takeout Duplicates section and `README.md`'s pipeline steps and
 Limitations sections document the new step. shellcheck/shfmt clean.
+
+## Phase 7 — Fix script 12's trash layout so restore actually works (2026-07-13)
+
+**Context:** #62, found during review of PR #61 (#60). `12_clean_immich_takeout_duplicates.sh`
+was the one trash-producing script that hadn't been brought in line with `13`'s pivot in Phase
+6: it still moved verified duplicates into a timestamped batch subdirectory
+(`$MEDIA_TRASH/immich_library_fotos_de_duplicates_<timestamp>/<relative-path>`), while
+`11_restore_from_trash.sh` reconstructs the original absolute path by only stripping the
+`$MEDIA_TRASH/` prefix and prepending `/`. Restoring a script-12 batch therefore landed files at
+a synthetic `/immich_library_fotos_de_duplicates_<timestamp>/...` path instead of their real
+original location. This was confirmed against real data: a `12 --confirm` run on 2026-05-29
+trashed a batch under exactly that broken layout on the repo owner's machine, and it is still
+sitting there unrestored (not part of this repo — a manual one-time cleanup for the repo owner,
+not covered by this fix; see the PR for #62).
+**Decisions:** Changed `move_or_report_duplicate()` in `12_clean_immich_takeout_duplicates.sh`
+to mirror each file's full original absolute path directly under `$MEDIA_TRASH`
+(`rel="${duplicate#/}"; dst="$MEDIA_TRASH/$rel"`), dropping the `TRASH_BATCH` timestamped
+subdirectory from the move destination entirely — the same pattern `06_delete_duplicates.sh`
+and `13_dedupe_live_photos.sh` already use. `$RUN_TIMESTAMP` is kept, but only for
+human-readable batch identification: printed in the summary (`Run timestamp: ...`, matching
+`13`'s summary line) and prefixed on each per-move log line
+(`[$RUN_TIMESTAMP] Moved duplicate: ...`), never in the actual move destination path. The
+typed-confirmation gate (`MOVE TAKEOUT DUPLICATES`) and dry-run default are unchanged.
+**Outcome:** Added a `test_immich_takeout_cleanup_confirm_and_restore_round_trip` regression
+test to `tests/test_shell_scripts.py`, mirroring the round-trip test Phase 6 added for script
+13: runs `12 --confirm` then `11_restore_from_trash.sh --confirm` and asserts the file lands
+back at its exact original absolute path. The pre-existing
+`test_immich_takeout_cleanup_confirm_moves_verified_duplicate_to_trash` test, which asserted
+the old (broken) batch-subdirectory destination, was updated to assert the new full-path
+destination instead — it was testing the bug's own layout, not the safety gate, so there was no
+old-vs-new behavior to preserve there. All 13 tests in `tests/test_shell_scripts.py` pass;
+`ruff check scripts` clean.
