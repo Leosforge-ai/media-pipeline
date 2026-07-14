@@ -463,3 +463,30 @@ dialog — while remaining fully visible on the step's own log panel afterward, 
 silently dropped from the human-facing view. All pre-existing confirm-gate tests
 (`GuidedRunController` refusal tests, Phase 4/10 dedup gate tests) pass unmodified. Full suite:
 101 tests pass (`flutter test`); `flutter analyze` clean.
+
+## Phase 12 — Pin gitleaks CLI version instead of floating @latest (2026-07-14)
+
+**Context:** #73. `gitleaks.yml` installed the gitleaks CLI via `go install
+github.com/zricethezav/gitleaks/v8@latest` against a hardcoded `go-version: '1.21'`. Gitleaks
+v8.30.1 shipped requiring `go >= 1.24.11` per its own `go.mod`, so the floating `@latest`
+started resolving to a release the pinned Go toolchain couldn't build — breaking the mandatory
+gitleaks security gate intermittently/permanently on every PR regardless of that PR's content
+(observed live: PR #47 failed while #40/#44/#45/#46 passed).
+**Decision:** Checked the `go.mod` `go` directive for the gitleaks tags around the break
+(via `curl https://proxy.golang.org/github.com/zricethezav/gitleaks/v8/@v/<tag>.mod`):
+v8.21.x–v8.27.x already require Go 1.23, v8.28.x–v8.29.x require Go 1.23.8, and v8.30.x
+requires Go 1.24.11+/1.25.4. Since even the oldest "reasonably current" gitleaks releases need
+newer-than-1.21 Go, pinning gitleaks alone (issue's primary suggested fix) wasn't enough on its
+own — both a gitleaks version *and* a compatible `go-version` needed pinning, which the issue's
+acceptance criteria anticipated ("verified compatible with whatever go-version the workflow
+specifies"). Pinned gitleaks to `v8.30.1` (latest existing release tag, confirmed present in
+`go list`'s module proxy version list, not an ancient release) and bumped `go-version` to
+`'1.24'` (setup-go resolves the latest 1.24.x patch, currently 1.24.13, which satisfies the
+`>= 1.24.11` requirement). Left the existing SHA-pinned `actions/checkout`/`actions/setup-go`
+steps untouched — only the floating `@latest` install and the Go version needed to move.
+**Outcome:** `.github/workflows/gitleaks.yml`'s install step now reads
+`go install "github.com/zricethezav/gitleaks/v8@${GITLEAKS_VERSION}"` with `GITLEAKS_VERSION:
+v8.30.1` pinned as a step `env`, plus an inline comment giving the exact commands (proxy.golang.org
+`.mod`/`/list` lookups) to check compatibility and bump both `GITLEAKS_VERSION` and `go-version`
+together the next time a deliberate upgrade is needed, so this doesn't silently drift back to a
+floating target. No product code (`scripts/`, `lib/`, `tests/`) touched — CI config only.
