@@ -533,3 +533,36 @@ partition on the real boot disk, and `detectFstype` returns a real filesystem ty
 root partition without needing the sudo fallback. Full suite: `flutter analyze` clean, `flutter
 test` 126/126 passing (up from 101), including the new real-machine tests running live during
 CI/local verification on this Linux dev box.
+## Phase 14 — Tools container image, Phase 1 of #76 (2026-07-14)
+
+**Context:** [#76](https://github.com/Leosforge-ai/media-pipeline/issues/76) is a multi-phase
+roadmap to move the pipeline to a Docker-containerized tool runtime (Design A), so the Dart
+desktop app can drive `exiftool`/`ffmpeg`/`rclone`/`czkawka` identically on Linux, macOS, and
+Windows via the Docker dependency this repo already requires for Immich. Phase 1 is standalone:
+build the tools image and prove it works, without wiring anything up yet.
+**Decisions:** Added `docker/tools/Dockerfile`, a multi-arch (`linux/amd64` + `linux/arm64`)
+image on `debian:bookworm-slim` (pinned by digest) bundling all four tools at pinned versions:
+`exiftool`/`ffmpeg` via exact-pinned apt package versions (`libimage-exiftool-perl=12.57+dfsg-1`,
+`ffmpeg=7:5.1.9-0+deb12u1` — matching what `scripts/01_setup_dependencies.sh` installs via apt
+today), `rclone` via a checksum-verified upstream release binary (`v1.74.4` — apt's bookworm
+version, 1.60.1, is years stale), and `czkawka_cli` via a checksum-verified upstream release
+binary pinned to an exact tag (`12.0.0`, not `latest` as the host script uses, since `latest` is
+not reproducible; czkawka doesn't publish a checksums file so the pinned SHA256s were computed
+at pin-time from the downloaded assets). Runs as a non-root `tools` user by default (full
+UID/GID host-mapping is Phase 3). Verified on both architectures (amd64 natively, arm64 via
+`docker buildx` + QEMU emulation): all four `--version`/`-ver` invocations exit 0 with sane
+output, and a real `czkawka_cli dup` scan against synthetic files correctly identified a planted
+duplicate pair and ignored the unique file, on both architectures.
+**Pivots:** None — the two most likely deviations flagged going in (czkawka needing a non-apt
+path, rclone's apt version being outdated) were both confirmed and documented rather than
+avoided.
+**Note for Phase 2:** `czkawka_cli`'s exit code is not a plain 0/non-zero success flag — it
+returns `0` when no duplicates are found and a non-zero count-like code when duplicates *are*
+found, discovered during this phase's verification. `scripts/05_cleanup_scan.sh` already pipes
+`czkawka_cli` invocations through `tee` under `set -euo pipefail` today; this is pre-existing
+Bash-script behavior, unrelated to and out of scope for this container-only PR, but worth
+checking when Phase 2 wires the container's `czkawka_cli` into any pipefail-sensitive call site.
+**Outcome:** A reproducible, verified, multi-arch tools image exists at
+`docker/tools/Dockerfile`, documented in `docker/tools/README.md` (build commands, debugging
+shell, and a version-bump procedure per tool). Nothing in `scripts/*.sh` or `lib/**` was
+touched — no pipeline behavior changed. #76 stays open; only Phase 1 is complete.
