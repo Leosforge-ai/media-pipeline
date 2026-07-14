@@ -292,9 +292,10 @@ void main() {
   );
 
   testWidgets(
-    'issue #54: the review dialog reads stdout-only output, so a stray '
-    'stderr line interleaved into the merged log can never mispair a '
-    'stale "Keep:" with an unrelated "Would trash:"',
+    'issue #54: a stderr line landing physically BETWEEN a real "Keep:" and '
+    'its matching "Would trash:" in the merged log must never overwrite the '
+    'pending keep and mispair the real trash target — the review dialog '
+    'must read stdout-only, not the merged log',
     (WidgetTester tester) async {
       tester.view.physicalSize = const Size(1600, 1200);
       tester.view.devicePixelRatio = 1;
@@ -306,15 +307,22 @@ void main() {
           'Keep: /tmp/media-pipeline-test/keep.mp4\n'
           'Would trash: /tmp/media-pipeline-test/trash.mp4\n';
 
-      // What the *merged* stdout+stderr log would look like if the script
-      // ever wrote to stderr between two groups' announcement lines — a
-      // dangling "Keep:" with no matching "Would trash:" in this stream,
-      // exactly the corruption issue #54 describes. If the review dialog
-      // ever read the merged log instead of stdout-only, this would surface
-      // a phantom/mispaired second entry.
+      // What the *merged* stdout+stderr log would look like if a stderr
+      // write landed between the real "Keep:" line and its matching
+      // "Would trash:" line, and that stderr text happened to itself match
+      // the "Keep: <path>" line pattern (e.g. a diagnostic tool echoing a
+      // path it's inspecting). `parseDuplicateDryRunOutput` has no concept
+      // of which stream a line came from — a second "Keep:" line always
+      // overwrites the pending keep, by design, so it can track a report's
+      // real group boundaries. If the review dialog ever parsed this
+      // merged buffer instead of stdout-only, the real "Would trash:" line
+      // would silently pair with the stderr line's path instead of the
+      // real keep — a genuine mispair, not just a harmless dangling
+      // orphan (this is the scenario issue #54 actually warns about).
       const corruptedMerged =
-          '$cleanStdout'
-          'Keep: /tmp/media-pipeline-test/stale-keep-from-stderr-race.mp4\n';
+          'Keep: /tmp/media-pipeline-test/keep.mp4\n'
+          'Keep: /tmp/media-pipeline-test/stderr-injected-keep.mp4\n'
+          'Would trash: /tmp/media-pipeline-test/trash.mp4\n';
 
       final fakeRunner = _StreamSeparatedFakePipelineRunner(
         stdoutOutputs: {'delete-dry-run': cleanStdout},
@@ -333,13 +341,19 @@ void main() {
       await tester.tap(find.text('Review Duplicate Thumbnails'));
       await tester.pumpAndSettle();
 
-      // Only the single real pair from stdout is shown — the dangling
-      // "Keep:" that only exists in the merged (stderr-contaminated) log
-      // never surfaces as a pair or a phantom entry.
+      // Exactly one pair is shown, and it pairs the *real* keep with the
+      // *real* trash target — not the stderr-injected path that would win
+      // if the merged buffer were parsed instead of stdout-only.
       expect(find.text('Showing all 1 pair.'), findsOneWidget);
       expect(find.text('keep.mp4'), findsWidgets);
       expect(find.text('trash.mp4'), findsWidgets);
-      expect(find.textContaining('stale-keep-from-stderr-race'), findsNothing);
+      expect(
+        find.textContaining('stderr-injected-keep'),
+        findsNothing,
+        reason:
+            'the stderr-injected "Keep:" line must never win the pairing '
+            'over the real keep target',
+      );
 
       await tester.tap(find.byTooltip('Close'));
       await tester.pumpAndSettle();
@@ -350,7 +364,7 @@ void main() {
       // the safety-relevant parse above.
       await tester.tap(find.text('Review Duplicate Move Plan'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('stale-keep-from-stderr-race'), findsOneWidget);
+      expect(find.textContaining('stderr-injected-keep'), findsOneWidget);
     },
   );
 }
