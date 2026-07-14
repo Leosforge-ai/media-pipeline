@@ -1,5 +1,12 @@
 import 'dart:io';
 
+import 'filesystem_ops.dart';
+
+// `parentDirectory` (dirname port) now lives in `filesystem_ops.dart`, since
+// [SafeFileMover.moveNoClobber] needs it too; re-exported here so existing
+// callers/tests importing it from this file keep working unchanged.
+export 'filesystem_ops.dart' show parentDirectory;
+
 /// Dart port of `scripts/11_restore_from_trash.sh` (Phase 0b of issue
 /// #76/#77's shared roadmap). This is the pipeline's sole recovery
 /// mechanism — every other confirm-gated destructive script
@@ -22,8 +29,12 @@ import 'dart:io';
 ///   external tool output to parse at all.
 /// - The `find ... | while read` walk + dry-run/confirm `mv -n` loop ->
 ///   [TrashRestorer.run], the thin async layer that actually touches the
-///   filesystem, using `Directory.list`/`File.rename` the same way
-///   `DriveDetector` in `drive_detection.dart` uses `Process.run`.
+///   filesystem, using `Directory.list` the same way `DriveDetector` in
+///   `drive_detection.dart` uses `Process.run`, and delegating the actual
+///   no-clobber/cross-device-safe move to the shared [SafeFileMover]
+///   primitive in `filesystem_ops.dart` (extracted from this file — see
+///   that file's doc comment — since the next three Dart ports in this
+///   series, 06/12/13, need the exact same move semantics).
 ///
 /// Bug-class note (regression target for PR #61/#63): the Bash script used
 /// to always exit 1 in `--confirm` mode, even on a fully successful
@@ -34,7 +45,7 @@ import 'dart:io';
 /// footgun by construction: [TrashRestorer.run] signals success by
 /// returning a `List<RestoreOutcome>` and signals failure exclusively by
 /// throwing (see [TrashRootNotFoundException] and the cross-device-copy
-/// verification in [TrashRestorer]); there is no exit-code/last-statement
+/// verification in [SafeFileMover]); there is no exit-code/last-statement
 /// mechanism in Dart for a print statement to accidentally hijack.
 
 // ---------------------------------------------------------------------------
@@ -69,28 +80,15 @@ String reconstructOriginalPath({
   required String trashRoot,
   required String trashedFilePath,
 }) {
-  final normalizedRoot =
-      trashRoot.endsWith('/') && trashRoot.length > 1
-          ? trashRoot.substring(0, trashRoot.length - 1)
-          : trashRoot;
+  final normalizedRoot = trashRoot.endsWith('/') && trashRoot.length > 1
+      ? trashRoot.substring(0, trashRoot.length - 1)
+      : trashRoot;
   final prefix = '$normalizedRoot/';
   if (!trashedFilePath.startsWith(prefix)) {
     throw NotUnderTrashRootException(trashRoot, trashedFilePath);
   }
   final rel = trashedFilePath.substring(prefix.length);
   return '/$rel';
-}
-
-/// Returns the parent directory of [path] (e.g. `/a/b/c.jpg` -> `/a/b`),
-/// mirroring Bash's `dirname`. Pure string manipulation, used to know which
-/// directories need `mkdir -p` equivalent creation before a restore move.
-String parentDirectory(String path) {
-  final trimmed = path.endsWith('/') && path.length > 1
-      ? path.substring(0, path.length - 1)
-      : path;
-  final index = trimmed.lastIndexOf('/');
-  if (index <= 0) return '/';
-  return trimmed.substring(0, index);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,24 +146,22 @@ class RestoreOutcome {
       'RestoreOutcome($action, $trashPath -> $destinationPath)';
 }
 
-/// Copies [src] to [dst]. The default implementation just calls
-/// `File(src).copy(dst)`; [TrashRestorer]'s constructor accepts an
-/// alternative so tests can simulate a corrupt/partial copy (e.g. one that
-/// writes truncated bytes) without needing a genuine cross-device rename
-/// failure to trigger the fallback path that uses it.
-typedef FileCopier = Future<void> Function(String src, String dst);
-
-Future<void> _defaultFileCopier(String src, String dst) =>
-    File(src).copy(dst).then((_) {});
-
 /// Walks `trashRoot` recursively and, for each file found, restores it to
 /// its reconstructed original absolute path — or, in dry-run mode (the
 /// default, matching the Bash script), only reports what would happen.
+///
+/// The actual move — no-clobber, cross-device-safe, copy-verify-delete
+/// fallback — is delegated entirely to the shared [SafeFileMover] primitive
+/// in `filesystem_ops.dart`; this class is now a thin caller that only
+/// handles trash-specific concerns: walking `trashRoot`, reconstructing
+/// original paths, and the dry-run/confirm gate.
 class TrashRestorer {
-  const TrashRestorer({this.copier = _defaultFileCopier});
+  const TrashRestorer({this.copier = defaultFileCopier});
 
-  /// Only ever overridden by tests (see [FileCopier]'s doc comment); real
-  /// callers always get the default `File.copy` implementation.
+  /// Only ever overridden by tests (see [FileCopier]'s doc comment on
+  /// `filesystem_ops.dart`); real callers always get the default
+  /// `File.copy` implementation. Threaded straight through to the
+  /// [SafeFileMover] this class delegates its actual moves to.
   final FileCopier copier;
 
   /// Lists every regular file currently under [trashRoot], recursively, in
@@ -180,10 +176,7 @@ class TrashRestorer {
       throw TrashRootNotFoundException(trashRoot);
     }
     final paths = <String>[
-      await for (final entity in dir.list(
-        recursive: true,
-        followLinks: false,
-      ))
+      await for (final entity in dir.list(recursive: true, followLinks: false))
         if (entity is File) entity.path,
     ];
     paths.sort();
@@ -208,6 +201,7 @@ class TrashRestorer {
   }) async {
     final trashPaths = await listTrashedFilePaths(trashRoot);
     final outcomes = <RestoreOutcome>[];
+    final mover = SafeFileMover(copier: copier);
     for (final trashPath in trashPaths) {
       final destinationPath = reconstructOriginalPath(
         trashRoot: trashRoot,
@@ -225,112 +219,22 @@ class TrashRestorer {
         continue;
       }
 
-      if (await File(destinationPath).exists()) {
-        // mv -n: never clobber an existing destination. The file stays in
-        // the trash — still not deleted, just not yet restorable until the
-        // conflict is resolved by hand.
-        outcomes.add(
-          RestoreOutcome(
-            trashPath: trashPath,
-            destinationPath: destinationPath,
-            action: RestoreAction.skippedExisting,
-          ),
-        );
-        continue;
-      }
-
-      await Directory(parentDirectory(destinationPath)).create(
-        recursive: true,
-      );
-      await _moveFile(trashPath, destinationPath);
+      // mv -n: never clobber an existing destination. On a skip, the file
+      // stays in the trash — still not deleted, just not yet restorable
+      // until the conflict is resolved by hand. See [SafeFileMover] in
+      // `filesystem_ops.dart` for the no-clobber/cross-device-safe move
+      // logic itself.
+      final result = await mover.moveNoClobber(trashPath, destinationPath);
       outcomes.add(
         RestoreOutcome(
           trashPath: trashPath,
           destinationPath: destinationPath,
-          action: RestoreAction.restored,
+          action: result == MoveResult.moved
+              ? RestoreAction.restored
+              : RestoreAction.skippedExisting,
         ),
       );
     }
     return outcomes;
-  }
-
-  /// Moves [src] to [dst]. `File.rename` is a single atomic syscall when
-  /// both paths share a filesystem/mount point — the common case, and the
-  /// direct equivalent of the Bash script's `mv -n`. If trash and the
-  /// reconstructed destination ever live on *different* filesystems (e.g.
-  /// `$MEDIA_TRASH` on one mounted drive, the original absolute path
-  /// resolving under another), `File.rename` fails the same way a
-  /// cross-device `mv` fails at the syscall level (`EXDEV`), unlike real
-  /// `mv`, which transparently falls back to copy+delete in that case. This
-  /// falls back the same way real `mv` would: copy, verify the copy landed
-  /// correctly, then delete the original — never deleting [src] before
-  /// [dst] is confirmed on disk.
-  Future<void> _moveFile(String src, String dst) async {
-    final srcFile = File(src);
-    try {
-      await srcFile.rename(dst);
-    } on FileSystemException catch (e) {
-      if (!_isCrossDeviceError(e)) rethrow;
-      await copyVerifyAndReplace(src, dst);
-    }
-  }
-
-  /// The cross-device fallback body: copy [src] to [dst], verify the copy
-  /// landed correctly, then delete the original — never deleting [src]
-  /// before [dst] is confirmed on disk. On *any* failure of the copy or
-  /// its verification, the known-bad partial/corrupt [dst] is deleted
-  /// before the failure propagates: [src] is still safely intact in the
-  /// trash at that point (it's only ever deleted after verification
-  /// succeeds), so removing a bad [dst] here is safe cleanup, not a risky
-  /// one.
-  ///
-  /// Without this cleanup, [TrashRestorer.run]'s existence-only no-clobber
-  /// check (`File(destinationPath).exists()`) would see the corrupt
-  /// leftover on any future restore attempt and silently report
-  /// [RestoreAction.skippedExisting] forever — permanently masking the
-  /// still-good file sitting safely in trash, even though nothing was
-  /// technically ever *deleted* (Cody review finding on PR #82).
-  ///
-  /// Only public so tests can exercise this exact failure-cleanup path
-  /// directly (via [FileCopier] injection simulating a truncated/corrupt
-  /// copy) without needing a genuine cross-device (`EXDEV`) rename failure
-  /// to trigger it — that requires two distinct mounted filesystems, which
-  /// isn't available in this sandbox or in CI. Production code only ever
-  /// reaches this via [_moveFile]'s cross-device catch branch above.
-  Future<void> copyVerifyAndReplace(String src, String dst) async {
-    final srcFile = File(src);
-    final srcLength = await srcFile.length();
-    try {
-      await copier(src, dst);
-      final dstLength = await File(dst).length();
-      if (dstLength != srcLength) {
-        throw FileSystemException(
-          'Cross-device restore copy verification failed: '
-          'expected $srcLength bytes, got $dstLength',
-          dst,
-        );
-      }
-    } catch (_) {
-      final partial = File(dst);
-      if (await partial.exists()) {
-        await partial.delete();
-      }
-      rethrow;
-    }
-    await srcFile.delete();
-  }
-
-  /// True if [e] represents a cross-device/cross-filesystem rename failure
-  /// (`EXDEV`, errno 18 on Linux/macOS) rather than some other rename
-  /// failure (permissions, missing parent, etc.), which should still
-  /// propagate as-is.
-  bool _isCrossDeviceError(FileSystemException e) {
-    final osError = e.osError;
-    if (osError != null && osError.errorCode == 18) return true;
-    // Fall back to a message check: some platforms/Dart SDK versions don't
-    // populate a reliable errorCode for this case, but always mention
-    // "Invalid cross-device link" (the standard EXDEV strerror() text) in
-    // the exception message.
-    return e.message.toLowerCase().contains('cross-device');
   }
 }
