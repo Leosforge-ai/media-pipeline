@@ -250,6 +250,185 @@ class ShellScriptSafetyTests(unittest.TestCase):
             self.assertEqual(duplicate.read_bytes(), b"same-photo")
 
 
+def write_fake_czkawka_tools(root: Path) -> Path:
+    """Fake czkawka_cli plus ffmpeg/ffprobe/convert stand-ins, for
+    environments without the real Czkawka/FFmpeg/ImageMagick binaries
+    installed (05_cleanup_scan.sh hard-requires all four to be on PATH).
+
+    The fake czkawka_cli does real work: it hashes the actual files under
+    the given -d directory and writes real duplicate groups to -f, in
+    Czkawka's real report format (a "Found N <noun>" header per group,
+    followed by quoted absolute paths) -- then exits with the group count,
+    mirroring czkawka_cli's real found-count exit code semantics (a
+    scan that finds N groups of duplicates exits non-zero with N, not 0/1
+    success-flag semantics). This means the regression test below exercises
+    the real pipefail/PIPESTATUS interaction against planted duplicate
+    files, not a mocked exit code (issue #81).
+    """
+    bin_dir = root / "fakebin"
+    bin_dir.mkdir()
+
+    czkawka = bin_dir / "czkawka_cli"
+    czkawka.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'mode="$1"; shift',
+                'dir=""',
+                'outfile=""',
+                "while [[ $# -gt 0 ]]; do",
+                '\tcase "$1" in',
+                '\t-d) dir="$2"; shift 2 ;;',
+                '\t-f) outfile="$2"; shift 2 ;;',
+                "\t*) shift ;;",
+                "\tesac",
+                "done",
+                "",
+                'case "$mode" in',
+                'image) noun="images" ;;',
+                'video) noun="videos" ;;',
+                'dup) noun="files" ;;',
+                '*) noun="items" ;;',
+                "esac",
+                "",
+                ': > "$outfile"',
+                "declare -A groups",
+                "while IFS= read -r -d '' f; do",
+                "\th=\"$(md5sum \"$f\" | awk '{print $1}')\"",
+                "\tgroups[\"$h\"]+=\"$f\"$'\\n'",
+                'done < <(find "$dir" -type f -print0)',
+                "",
+                "count=0",
+                'for h in "${!groups[@]}"; do',
+                '\tmapfile -t files < <(printf "%s" "${groups[$h]}")',
+                '\tif [[ "${#files[@]}" -ge 2 ]]; then',
+                "\t\tcount=$((count + 1))",
+                '\t\tprintf "Found %d %s in group\\n" "${#files[@]}" "$noun" >>"$outfile"',
+                '\t\tfor f in "${files[@]}"; do',
+                "\t\t\tprintf '\"%s\" - 10 KiB\\n' \"$f\" >>\"$outfile\"",
+                "\t\tdone",
+                '\t\tprintf "\\n" >>"$outfile"',
+                "\tfi",
+                "done",
+                "",
+                'echo "fake czkawka_cli: mode=$mode dir=$dir groups=$count" >&2',
+                'exit "$count"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    czkawka.chmod(0o755)
+
+    for name in ("ffmpeg", "ffprobe", "convert"):
+        stub = bin_dir / name
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+
+    return bin_dir
+
+
+class CleanupScanExitCodeTests(unittest.TestCase):
+    # Regression test for issue #81: 05_cleanup_scan.sh pipes each
+    # czkawka_cli invocation through `tee` under `set -euo pipefail`.
+    # czkawka_cli's exit code is a found-count, not a success flag, so the
+    # script used to abort the moment the *first* scan (image) found any
+    # duplicates -- the video scan, exact-duplicate scan, and summary
+    # section never ran. This plants real duplicate files (identical
+    # bytes) and asserts the script runs every scan and reaches its
+    # summary output instead of aborting after the first non-zero exit.
+    def test_completes_all_scans_and_reaches_summary_when_duplicates_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports"
+            staging = root / "cleaning_staging"
+            staging.mkdir(parents=True)
+
+            first = staging / "a.jpg"
+            second = staging / "b.jpg"
+            first.write_bytes(b"identical-photo-bytes")
+            second.write_bytes(b"identical-photo-bytes")
+
+            bin_dir = write_fake_czkawka_tools(root)
+
+            result = run_script(
+                "05_cleanup_scan.sh",
+                root,
+                reports,
+                extra_env={
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "RUN_BLUR_SCAN": "0",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # All three scans ran (not just the first).
+            self.assertIn("==> Running Czkawka similar image scan", result.stdout)
+            self.assertIn("==> Running Czkawka similar video scan", result.stdout)
+            self.assertIn(
+                "==> Running Czkawka exact duplicate file scan", result.stdout
+            )
+            # The found-count exit codes were treated as informational, not fatal.
+            self.assertIn(
+                "similar image scan: completed, found-count exit 1", result.stdout
+            )
+            self.assertIn(
+                "similar video scan: completed, found-count exit 1", result.stdout
+            )
+            self.assertIn(
+                "exact duplicate file scan: completed, found-count exit 1",
+                result.stdout,
+            )
+            # Execution reached the summary section at the end of the script.
+            self.assertIn("==> Summary", result.stdout)
+            self.assertIn("Image groups: 1", result.stdout)
+            self.assertIn("Video groups: 1", result.stdout)
+            self.assertIn("Exact duplicate groups: 1", result.stdout)
+            self.assertTrue((reports / "duplicate_images.txt").exists())
+            self.assertTrue((reports / "duplicate_videos.txt").exists())
+            self.assertTrue((reports / "duplicate_files.txt").exists())
+
+    def test_genuine_czkawka_failure_still_aborts_the_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports"
+            staging = root / "cleaning_staging"
+            staging.mkdir(parents=True)
+            (staging / "a.jpg").write_bytes(b"some-bytes")
+
+            bin_dir = root / "fakebin"
+            bin_dir.mkdir()
+            # A czkawka_cli stand-in that crashes like an uncaught Rust
+            # panic (exit 101) rather than returning a found-count.
+            czkawka = bin_dir / "czkawka_cli"
+            czkawka.write_text(
+                "#!/usr/bin/env bash\necho 'thread main panicked' >&2\nexit 101\n",
+                encoding="utf-8",
+            )
+            czkawka.chmod(0o755)
+            for name in ("ffmpeg", "ffprobe", "convert"):
+                stub = bin_dir / name
+                stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+                stub.chmod(0o755)
+
+            result = run_script(
+                "05_cleanup_scan.sh",
+                root,
+                reports,
+                extra_env={
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "RUN_BLUR_SCAN": "0",
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("czkawka_cli failed during", result.stderr)
+            # It must not have proceeded past the first (image) scan.
+            self.assertNotIn("similar video scan", result.stdout)
+            self.assertNotIn("==> Summary", result.stdout)
+
+
 def write_fake_ffprobe(root: Path) -> Path:
     """A stand-in for ffprobe so tests don't need real encoded media or a
     real ffprobe binary on the test runner.

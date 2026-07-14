@@ -607,3 +607,44 @@ mode moves + no-clobber, a full trash-convention round-trip matching scripts 06/
 and the PR #61/#63 regression class). Full suite: `flutter analyze` clean, `flutter test`
 146/146 passing (up from 126). Part of #76 and #77; neither issue closes — 06/12/13 and the
 Phase 0c/0d work remain.
+## Phase 16 — Fix `05_cleanup_scan.sh` aborting on found-count exit codes (2026-07-14)
+
+**Context:** Issue #81, found and reproduced during Cody's review of PR #80 (#76 Phase 1):
+`scripts/05_cleanup_scan.sh` runs under `set -euo pipefail` and pipes every `czkawka_cli`
+invocation through `tee` for logging. `czkawka_cli`'s exit code for the `image`/`video`/`dup`
+subcommands is a found-count, not a plain success flag — `0` means nothing found, any other
+value means N duplicates/similar items were found (the normal, expected outcome of a dedup
+scanner). Because of `pipefail`, that found-count propagated through the `tee` pipe as the
+pipeline's exit status, and `set -e` treated it as a fatal error — aborting the whole script
+the instant the *first* scan (image) found anything. The video scan, exact-duplicate scan,
+blur scan, and summary section never ran whenever duplicates existed, which is the common case,
+not an edge case. This was pre-existing, shipped behavior, flagged as a "Note for Phase 2" in
+Phase 14 above but out of scope for that container-only PR.
+**Decisions:** Captured `czkawka_cli`'s real exit code via `${PIPESTATUS[0]}` for every
+`czkawka_cli ... | tee ...` invocation (image, video, dup), instead of trusting pipefail's
+propagated pipeline status. Refactored the three near-identical invocations into one
+`run_czkawka_scan()` helper to keep the exit-code handling in one place. Distinguished a
+found-count (informational, must not abort the script) from a genuine tool failure (must still
+abort, per this repo's data-loss-prevention priority) by treating only exit codes attributable
+to a real crash/invocation failure as fatal: `101` (the default exit code for an uncaught Rust
+panic — `czkawka_cli` is a Rust binary) and `126`/`127` (standard "found but not executable" /
+"command not found" codes). Every other non-zero code is treated as an informational
+found-count. Also captured `tee`'s own exit code via `${PIPESTATUS[1]}` (both indices read in
+one `local` statement, since bash resets `PIPESTATUS` after every simple command) and treat a
+failed log write as a real, separate error. `06_delete_duplicates.sh`'s report-parsing format
+is unchanged — only `05`'s exit-code handling changed.
+**Verification:** Added a regression test (`tests/test_shell_scripts.py`,
+`CleanupScanExitCodeTests`) that plants two real, byte-identical duplicate files and runs
+`05_cleanup_scan.sh` against a fake `czkawka_cli` that does real work (hashes the real files
+under `-d`, writes real duplicate groups to `-f` in Czkawka's actual report format, then exits
+with the real group count) plus stub `ffmpeg`/`ffprobe`/`convert` so the script's tool-presence
+check passes without needing the real binaries installed. Confirmed the test would have caught
+the original bug: temporarily reverted the script fix and re-ran the test suite — both new
+tests failed (`1 != 0` on the found-duplicates case; the genuine-failure case never printed
+anything since the script died silently through pipefail before reaching the new error-handling
+path). Restored the fix and re-ran: both tests, plus the full existing suite (47 tests total),
+`shellcheck -x -e SC1091`, `shfmt -d`, and `ruff check` all pass clean.
+**Pivots:** None.
+**Outcome:** `05_cleanup_scan.sh` now runs all four scan types and prints the summary section
+regardless of how many duplicates each scan finds, while still surfacing and aborting on a
+genuine `czkawka_cli` crash or invocation failure. Closes #81.
