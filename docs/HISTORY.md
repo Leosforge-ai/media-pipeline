@@ -480,13 +480,18 @@ newer-than-1.21 Go, pinning gitleaks alone (issue's primary suggested fix) wasn'
 own — both a gitleaks version *and* a compatible `go-version` needed pinning, which the issue's
 acceptance criteria anticipated ("verified compatible with whatever go-version the workflow
 specifies"). Pinned gitleaks to `v8.30.1` (latest existing release tag, confirmed present in
-`go list`'s module proxy version list, not an ancient release) and bumped `go-version` to
-`'1.24'` (setup-go resolves the latest 1.24.x patch, currently 1.24.13, which satisfies the
-`>= 1.24.11` requirement). Left the existing SHA-pinned `actions/checkout`/`actions/setup-go`
-steps untouched — only the floating `@latest` install and the Go version needed to move.
+`go list`'s module proxy version list, not an ancient release). Initially bumped `go-version` to
+the bare minor `'1.24'`, but Cody's PR review flagged that `actions/setup-go`'s default
+`check-latest: false` prefers a cached toolchain over the newest matching patch — a partial
+version spec isn't strictly guaranteed to resolve above the `>= 1.24.11` floor gitleaks v8.30.1
+needs, which could silently recreate this exact failure class. Tightened to the exact patch
+`'1.24.13'`, verified as a real published Go release via `https://go.dev/dl/?mode=json`. Left
+the existing SHA-pinned `actions/checkout`/`actions/setup-go` steps untouched — only the
+floating `@latest` install and the Go version needed to move.
 **Outcome:** `.github/workflows/gitleaks.yml`'s install step now reads
 `go install "github.com/zricethezav/gitleaks/v8@${GITLEAKS_VERSION}"` with `GITLEAKS_VERSION:
-v8.30.1` pinned as a step `env`, plus an inline comment giving the exact commands (proxy.golang.org
-`.mod`/`/list` lookups) to check compatibility and bump both `GITLEAKS_VERSION` and `go-version`
-together the next time a deliberate upgrade is needed, so this doesn't silently drift back to a
-floating target. No product code (`scripts/`, `lib/`, `tests/`) touched — CI config only.
+v8.30.1` pinned as a step `env`, and `go-version: '1.24.13'` (exact patch, not a bare minor),
+plus inline comments giving the exact commands (proxy.golang.org `.mod`/`/list` and go.dev/dl
+JSON lookups) to check compatibility and bump `GITLEAKS_VERSION` and the exact `go-version`
+patch together the next time a deliberate upgrade is needed, so this doesn't silently drift
+back to a floating target. No product code (`scripts/`, `lib/`, `tests/`) touched — CI config only.
