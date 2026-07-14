@@ -131,12 +131,52 @@ class DuplicateReviewSample {
   const DuplicateReviewSample({
     required this.shown,
     required this.totalPairs,
-  });
+    required this.shownIndices,
+    int? remainingBeforeBatch,
+  }) : _remainingBeforeBatch = remainingBeforeBatch ?? totalPairs;
 
   final List<DuplicateReviewPair> shown;
   final int totalPairs;
 
-  bool get isSampled => shown.length < totalPairs;
+  /// The original-report indices (into the full parsed pairs list) that
+  /// [shown] was drawn from, in the same order as [shown]. Lets callers
+  /// track cumulative coverage across more than one sample batch (issue
+  /// #53) without guessing from path equality, which could collide for
+  /// pairs that legitimately share a path.
+  final List<int> shownIndices;
+
+  /// How many pairs were still un-reviewed immediately before this batch
+  /// was drawn. Defaults to [totalPairs] (nothing excluded yet) for a
+  /// plain [sampleDuplicateReviewPairs] call, so existing callers/tests
+  /// that never pass this see unchanged behavior.
+  final int _remainingBeforeBatch;
+
+  /// Whether this batch left pairs un-reviewed that a later batch could
+  /// still cover — i.e. [shown] is smaller than what was actually still
+  /// un-reviewed when this batch was drawn. Deliberately compares against
+  /// the *remaining* pool, not the grand [totalPairs]: once every pair has
+  /// been shown across enough "Review Another Sample" batches, the final
+  /// batch reports `false` here even though earlier batches individually
+  /// covered less than the full set (#53).
+  bool get isSampled => shown.length < _remainingBeforeBatch;
+
+  /// Percentage (0-100) of all [totalPairs] pairs that [shown] covers.
+  /// Always floored, never rounded up — this is a trust signal shown next
+  /// to the destructive confirm action (#53), so it must never overstate
+  /// how much was actually reviewed.
+  int get coveragePercent =>
+      duplicateReviewCoveragePercent(shown.length, totalPairs);
+}
+
+/// Percentage (0-100) of [totalPairs] that [reviewedCount] represents.
+/// Floored (never rounded up) so a coverage indicator can never overstate
+/// how much of a duplicate set has actually been reviewed. A set with 0
+/// total pairs is trivially fully "covered" (nothing to review).
+int duplicateReviewCoveragePercent(int reviewedCount, int totalPairs) {
+  if (totalPairs <= 0) {
+    return 100;
+  }
+  return (reviewedCount * 100) ~/ totalPairs;
 }
 
 /// Samples at most [maxPairs] pairs from [pairs] for display.
@@ -145,22 +185,62 @@ class DuplicateReviewSample {
 /// sample (reproducible across app restarts / repeated reviews of the same
 /// dry-run output), then sorts the sampled indices back into original
 /// report order for a stable, readable display.
+///
+/// Equivalent to the initial (batch 0) call to
+/// [sampleAdditionalDuplicateReviewPairs] with nothing excluded yet.
 DuplicateReviewSample sampleDuplicateReviewPairs(
   List<DuplicateReviewPair> pairs, {
   int maxPairs = 20,
   int seed = 42,
 }) {
-  if (pairs.length <= maxPairs) {
-    return DuplicateReviewSample(shown: pairs, totalPairs: pairs.length);
+  return sampleAdditionalDuplicateReviewPairs(
+    pairs,
+    const <int>{},
+    maxPairs: maxPairs,
+    seed: seed,
+    batchNumber: 0,
+  );
+}
+
+/// Draws another sample batch of up to [maxPairs] pairs from [pairs],
+/// skipping any index already in [alreadyReviewedIndices] — so repeatedly
+/// requesting another batch (issue #53's "page through additional sample
+/// batches" direction) keeps covering new ground instead of re-showing
+/// pairs the human already looked at.
+///
+/// [batchNumber] (0 for the initial sample, 1 for the first "show me
+/// another batch" click, and so on) is folded into the shuffle seed so
+/// each successive batch is deterministic and reproducible, yet distinct
+/// from earlier ones for the same underlying report.
+DuplicateReviewSample sampleAdditionalDuplicateReviewPairs(
+  List<DuplicateReviewPair> pairs,
+  Set<int> alreadyReviewedIndices, {
+  int maxPairs = 20,
+  int seed = 42,
+  int batchNumber = 0,
+}) {
+  final remainingIndices = [
+    for (var i = 0; i < pairs.length; i++)
+      if (!alreadyReviewedIndices.contains(i)) i,
+  ];
+
+  if (remainingIndices.length <= maxPairs) {
+    return DuplicateReviewSample(
+      shown: [for (final i in remainingIndices) pairs[i]],
+      totalPairs: pairs.length,
+      shownIndices: remainingIndices,
+      remainingBeforeBatch: remainingIndices.length,
+    );
   }
 
-  final indices = List<int>.generate(pairs.length, (i) => i)
-    ..shuffle(Random(seed));
-  final sampledIndices = indices.take(maxPairs).toList()..sort();
+  final shuffled = [...remainingIndices]..shuffle(Random(seed + batchNumber));
+  final sampledIndices = shuffled.take(maxPairs).toList()..sort();
 
   return DuplicateReviewSample(
     shown: [for (final i in sampledIndices) pairs[i]],
     totalPairs: pairs.length,
+    shownIndices: sampledIndices,
+    remainingBeforeBatch: remainingIndices.length,
   );
 }
 

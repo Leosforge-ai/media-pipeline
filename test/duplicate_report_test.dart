@@ -193,6 +193,165 @@ Would trash: relative/not/absolute.jpg
 
       expect(first.shown, second.shown);
     });
+
+    test('shownIndices line up with shown and index the original list', () {
+      final pairs = makePairs(143);
+
+      final sample = sampleDuplicateReviewPairs(pairs, maxPairs: 20);
+
+      expect(sample.shownIndices.length, sample.shown.length);
+      for (var i = 0; i < sample.shown.length; i++) {
+        expect(pairs[sample.shownIndices[i]], sample.shown[i]);
+      }
+    });
+
+    test('coveragePercent reflects shown vs total, floored (#53)', () {
+      final pairs = makePairs(143);
+
+      // 20 of 143 is 13.98...%, must floor to 13, never round up to 14 —
+      // this is a trust signal shown next to a destructive confirm action.
+      expect(
+        sampleDuplicateReviewPairs(pairs, maxPairs: 20).coveragePercent,
+        13,
+      );
+      expect(
+        sampleDuplicateReviewPairs(makePairs(5), maxPairs: 20).coveragePercent,
+        100,
+      );
+      expect(sampleDuplicateReviewPairs(<DuplicateReviewPair>[]).coveragePercent, 100);
+    });
+  });
+
+  group('duplicateReviewCoveragePercent', () {
+    test('floors instead of rounding up', () {
+      expect(duplicateReviewCoveragePercent(1, 3), 33);
+      expect(duplicateReviewCoveragePercent(2, 3), 66);
+    });
+
+    test('a set with no pairs is trivially fully covered', () {
+      expect(duplicateReviewCoveragePercent(0, 0), 100);
+    });
+
+    test('full coverage is exactly 100', () {
+      expect(duplicateReviewCoveragePercent(143, 143), 100);
+    });
+  });
+
+  group('sampleAdditionalDuplicateReviewPairs', () {
+    List<DuplicateReviewPair> makePairs(int n) => [
+      for (var i = 0; i < n; i++)
+        DuplicateReviewPair(keepPath: '/keep$i', trashPath: '/trash$i'),
+    ];
+
+    test('excludes already-reviewed indices from the next batch', () {
+      final pairs = makePairs(143);
+      final firstBatch = sampleAdditionalDuplicateReviewPairs(
+        pairs,
+        const {},
+        maxPairs: 20,
+        batchNumber: 0,
+      );
+
+      final secondBatch = sampleAdditionalDuplicateReviewPairs(
+        pairs,
+        firstBatch.shownIndices.toSet(),
+        maxPairs: 20,
+        batchNumber: 1,
+      );
+
+      final overlap = secondBatch.shownIndices.toSet().intersection(
+        firstBatch.shownIndices.toSet(),
+      );
+      expect(overlap, isEmpty);
+      expect(secondBatch.totalPairs, 143);
+      expect(secondBatch.shown.length, 20);
+    });
+
+    test(
+      'once every pair has been reviewed, the next batch is empty (not a '
+      'repeat of an earlier one)',
+      () {
+        final pairs = makePairs(5);
+        final firstBatch = sampleAdditionalDuplicateReviewPairs(
+          pairs,
+          const {},
+          maxPairs: 20,
+          batchNumber: 0,
+        );
+        expect(firstBatch.shown.length, 5);
+
+        final secondBatch = sampleAdditionalDuplicateReviewPairs(
+          pairs,
+          firstBatch.shownIndices.toSet(),
+          maxPairs: 20,
+          batchNumber: 1,
+        );
+
+        expect(secondBatch.shown, isEmpty);
+        expect(secondBatch.totalPairs, 5);
+      },
+    );
+
+    test('a remaining tail smaller than maxPairs is shown in full, not '
+        're-sampled down further', () {
+      final pairs = makePairs(25);
+      final firstBatch = sampleAdditionalDuplicateReviewPairs(
+        pairs,
+        const {},
+        maxPairs: 20,
+        batchNumber: 0,
+      );
+      expect(firstBatch.shown.length, 20);
+
+      final secondBatch = sampleAdditionalDuplicateReviewPairs(
+        pairs,
+        firstBatch.shownIndices.toSet(),
+        maxPairs: 20,
+        batchNumber: 1,
+      );
+
+      expect(secondBatch.shown.length, 5);
+      expect(secondBatch.isSampled, isFalse);
+    });
+
+    test('is reproducible for the same seed and batch number', () {
+      final pairs = makePairs(143);
+      final alreadyReviewed = {for (var i = 0; i < 20; i++) i};
+
+      final first = sampleAdditionalDuplicateReviewPairs(
+        pairs,
+        alreadyReviewed,
+        seed: 7,
+        batchNumber: 1,
+      );
+      final second = sampleAdditionalDuplicateReviewPairs(
+        pairs,
+        alreadyReviewed,
+        seed: 7,
+        batchNumber: 1,
+      );
+
+      expect(first.shown, second.shown);
+    });
+
+    test(
+      'sampleDuplicateReviewPairs is equivalent to batch 0 with nothing '
+      'excluded',
+      () {
+        final pairs = makePairs(143);
+
+        final viaSample = sampleDuplicateReviewPairs(pairs, seed: 7);
+        final viaAdditional = sampleAdditionalDuplicateReviewPairs(
+          pairs,
+          const {},
+          seed: 7,
+          batchNumber: 0,
+        );
+
+        expect(viaSample.shown, viaAdditional.shown);
+        expect(viaSample.shownIndices, viaAdditional.shownIndices);
+      },
+    );
   });
 
   group('isDisplayableImagePath', () {
