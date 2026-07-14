@@ -120,62 +120,76 @@ build_mount_commands() {
 # Pure logic (unit-testable): boot-disk exclusion
 # ---------------------------------------------------------------------------
 
+# lsblk_ancestor_chain_raw DEVICE
+# Raw parsing primitive (unit-testable on its own -- see
+# tests/test_first_time_drive_setup.py): runs a single
+# `lsblk -o NAME,TYPE -P -s DEVICE` call and echoes its unmodified stdout,
+# one shell-quoted KEY="value" line per ancestor of DEVICE, ordered from
+# DEVICE itself up to its top-level whole disk. `-s`/`--inverse` is lsblk's
+# own built-in "print the dependency chain of this device" mode -- it asks
+# lsblk itself for exactly the ancestor chain of the one device passed in,
+# nothing else (verified empirically: `lsblk -o NAME,TYPE -P -s /dev/vda`
+# on a whole disk with several partitions returns only that disk's own
+# single row, never its children).
+#
+# This replaces an earlier approach (see #57/#58) that manually walked the
+# PKNAME parent chain one hop at a time in a loop, using
+# `lsblk -d -no TYPE/PKNAME "$current"` per hop. That approach caused two
+# real bugs: a single-PKNAME-hop bug that stopped at an LVM root's
+# intermediate physical-volume partition instead of continuing to the
+# whole disk (#56), and a missing `-d`/`--nodeps` flag that let a whole
+# disk's child-partition rows leak into what was supposed to be a
+# single-value TYPE/PKNAME query, corrupting the loop (#57/#58). Both bugs
+# were specific to hand-rolled chain-walking; `-s` has no loop, no hop
+# counter, and no `-d` flag whose omission could reintroduce that bug
+# class -- lsblk itself is responsible for building the correct ancestor
+# chain in one call, which is exactly the job it already does internally
+# to render its normal tree view.
+#
+# Kept as its own function (rather than inlined into
+# disk_name_from_partition below) so the raw parse step can be exercised
+# directly by a test, independent of the "pick the TYPE=disk row" filtering
+# logic layered on top of it.
+lsblk_ancestor_chain_raw() {
+	local device="$1"
+	lsblk -o NAME,TYPE -P -s "$device" 2>/dev/null || true
+}
+
 # disk_name_from_partition DEVICE_PATH
 # Resolves a block device path (e.g. /dev/sda1, /dev/mapper/vg-root) to the
 # name of the top-level whole-disk device it ultimately lives on (e.g.
-# `sda`), by walking the `lsblk` PKNAME parent chain until a TYPE=disk
-# device is reached -- not just a single hop. This matters for LVM roots
-# (`/dev/mapper/vg-root` -> its physical-volume partition, e.g. `sda1` -> the
-# disk, `sda`) where a single PKNAME hop would stop at the intermediate
-# partition and fail to exclude sibling partitions on the same physical
-# disk. Any bracketed btrfs subvolume suffix (e.g. `/dev/sda2[/@]`, as
-# `findmnt` reports for a subvolume root) is stripped before resolution.
-# Falls back to the current device's own base name if lsblk can't report a
-# type/parent for it (e.g. it's already a whole disk, or lsblk has nothing
-# to say about it -- as in tests with limited stubs).
+# `sda`), using lsblk's own inverse-dependency ancestor chain (see
+# lsblk_ancestor_chain_raw above) rather than manually walking PKNAME hops.
+# This handles LVM roots (`/dev/mapper/vg-root` -> its physical-volume
+# partition, e.g. `sda1` -> the disk, `sda`) correctly because the chain
+# lsblk returns already includes every hop, not just the first one. Any
+# bracketed btrfs subvolume suffix (e.g. `/dev/sda2[/@]`, as `findmnt`
+# reports for a subvolume root) is stripped before resolution. Falls back
+# to the device's own base name if lsblk reports no TYPE=disk row anywhere
+# in the chain (e.g. lsblk has nothing to say about the device at all, as
+# in tests with limited stubs).
 disk_name_from_partition() {
 	local device="$1"
 	device="${device%%\[*}" # strip bracketed btrfs subvolume suffix
-	local current="$device" type pk name
-	local -i hops=0 max_hops=10
+	local line disk_name=""
 
-	while true; do
-		name="$(basename "$current")"
-		# -d/--nodeps is required here: without it, lsblk given a
-		# whole-disk device (e.g. /dev/nvme0n1) also lists that disk's
-		# children (partitions), so `-no TYPE`/`-no PKNAME` return one
-		# line per child in addition to the disk's own line. That
-		# multi-line output was then being treated as a single value by
-		# the `[[ "$type" == "disk" ]]` compare and `current="/dev/$pk"`
-		# concatenation below, producing a malformed, embedded-newline,
-		# duplicated device "path" that corrupted every later iteration
-		# and ultimately this function's own stdout (observed live as
-		# `root_boot_disk` returning "\nnvme0n1\nnvme0n1" instead of
-		# "nvme0n1" -- see #57). -d restricts each query to exactly the
-		# one device passed in, so type/pk are always a single value.
-		# The first-line extraction below is kept as a defensive second
-		# layer in case any lsblk/stub still returns extra lines.
-		type="$(lsblk -d -no TYPE "$current" 2>/dev/null || true)"
-		type="${type%%$'\n'*}"
-		if [[ "$type" == "disk" ]]; then
-			printf '%s\n' "$name"
-			return 0
-		fi
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		local NAME="" TYPE=""
+		# lsblk -P emits shell-quoted KEY="value" pairs; this is the
+		# documented way to parse it without column-width ambiguity.
+		# shellcheck disable=SC2294
+		eval "$line"
+		[[ "$TYPE" == "disk" ]] && disk_name="$NAME"
+	done < <(lsblk_ancestor_chain_raw "$device")
 
-		pk="$(lsblk -d -no PKNAME "$current" 2>/dev/null || true)"
-		pk="${pk%%$'\n'*}"
-		if [[ -z "$pk" ]]; then
-			printf '%s\n' "$name"
-			return 0
-		fi
+	if [[ -n "$disk_name" ]]; then
+		printf '%s\n' "$disk_name"
+		return 0
+	fi
 
-		current="/dev/$pk"
-		hops+=1
-		if ((hops > max_hops)); then
-			printf '%s\n' "$(basename "$current")"
-			return 0
-		fi
-	done
+	printf '%s\n' "$(basename "$device")"
+	return 0
 }
 
 # root_boot_disk

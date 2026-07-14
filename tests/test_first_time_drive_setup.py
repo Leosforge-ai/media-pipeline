@@ -183,7 +183,11 @@ class BootDiskExclusionTests(unittest.TestCase):
         candidates = [line for line in result.stdout.splitlines() if line]
         self.assertEqual(candidates, ["sdd1"])
 
-    def test_disk_name_from_partition_uses_lsblk_pkname(self):
+    def test_disk_name_from_partition_uses_lsblk_ancestor_chain(self):
+        # disk_name_from_partition resolves via lsblk_ancestor_chain_raw's
+        # single `-s`/--inverse call rather than a manual PKNAME loop; the
+        # stub returns the full ancestor chain (partition + disk row) in
+        # one call, as real lsblk would.
         with tempfile.TemporaryDirectory() as tmp:
             stub_dir = Path(tmp)
             make_stub_bin(
@@ -191,11 +195,13 @@ class BootDiskExclusionTests(unittest.TestCase):
                 "lsblk",
                 textwrap.dedent(
                     """
-                    [[ "$1" == "-d" ]] && shift
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "sda" ;;
-                        *) echo "" ;;
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/sda2)
+                          printf 'NAME="sda2" TYPE="part"\\n'
+                          printf 'NAME="sda" TYPE="disk"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -231,11 +237,13 @@ class BootDiskExclusionTests(unittest.TestCase):
                 "lsblk",
                 textwrap.dedent(
                     """
-                    [[ "$1" == "-d" ]] && shift
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "sda" ;;
-                        *) echo "" ;;
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/sda2)
+                          printf 'NAME="sda2" TYPE="part"\\n'
+                          printf 'NAME="sda" TYPE="disk"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -256,7 +264,9 @@ class BootDiskExclusionTests(unittest.TestCase):
         # the top-level whole disk (sda), not stop at the intermediate
         # physical-volume partition (sda1) it happens to sit on. Stopping at
         # sda1 would let a sibling partition on the same physical disk
-        # (sda2) slip past the boot-disk exclusion filter.
+        # (sda2) slip past the boot-disk exclusion filter. With the `-s`
+        # primitive, lsblk itself returns the whole chain (lvm -> part ->
+        # disk) in a single call, so there is no separate per-hop stubbing.
         with tempfile.TemporaryDirectory() as tmp:
             stub_dir = Path(tmp)
             make_stub_bin(
@@ -277,21 +287,14 @@ class BootDiskExclusionTests(unittest.TestCase):
                 "lsblk",
                 textwrap.dedent(
                     """
-                    [[ "$1" == "-d" ]] && shift
-                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
-                      case "$3" in
-                        /dev/mapper/vg-root) echo "lvm" ;;
-                        /dev/sda1) echo "part" ;;
-                        /dev/sda) echo "disk" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/mapper/vg-root) echo "sda1" ;;
-                        /dev/sda1) echo "sda" ;;
-                        *) echo "" ;;
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/mapper/vg-root)
+                          printf 'NAME="vg-root" TYPE="lvm"\\n'
+                          printf 'NAME="sda1" TYPE="part"\\n'
+                          printf 'NAME="sda" TYPE="disk"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -342,19 +345,13 @@ class BootDiskExclusionTests(unittest.TestCase):
                 "lsblk",
                 textwrap.dedent(
                     """
-                    [[ "$1" == "-d" ]] && shift
-                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "part" ;;
-                        /dev/sda) echo "disk" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "sda" ;;
-                        *) echo "" ;;
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/sda2)
+                          printf 'NAME="sda2" TYPE="part"\\n'
+                          printf 'NAME="sda" TYPE="disk"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -390,19 +387,13 @@ class BootDiskExclusionTests(unittest.TestCase):
                 "lsblk",
                 textwrap.dedent(
                     """
-                    [[ "$1" == "-d" ]] && shift
-                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "part" ;;
-                        /dev/sda) echo "disk" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "sda" ;;
-                        *) echo "" ;;
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/sda2)
+                          printf 'NAME="sda2" TYPE="part"\\n'
+                          printf 'NAME="sda" TYPE="disk"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -417,71 +408,42 @@ class BootDiskExclusionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "sda")
 
-    # -- Regression tests for #57 bug 2 --------------------------------
+    # -- Isolated tests of the raw ancestor-chain parsing step ----------
     #
-    # These stub `lsblk` to reproduce the exact real-world failure mode:
-    # called *without* `-d`/`--nodeps` on a whole-disk device that has
-    # children (partitions), `lsblk -no TYPE`/`-no PKNAME` returns one line
-    # per child in addition to the disk's own line. `disk_name_from_partition`
-    # must always pass `-d` so it only ever sees the single device it asked
-    # about; if the fix regresses (drops `-d`), the stub below returns the
-    # exact malformed multi-line values observed live
-    # ("\nnvme0n1\nnvme0n1") and the assertions here would catch it.
+    # Part of #59: Astrid's review of PR #58 empirically showed (by testing
+    # three code variants) that the end-to-end regression tests added for
+    # the #57/#58 missing-`-d` bug only exercised the defensive
+    # first-line-truncation backstop in disk_name_from_partition, not the
+    # `-d` fix itself -- stripping only `-d` (keeping the truncation) still
+    # passed all 29 tests silently. That backstop and the manual PKNAME
+    # loop it protected are gone now (replaced by the single-call `-s`
+    # primitive above), but the same isolation *principle* applies to
+    # whatever raw parsing step the current implementation relies on: test
+    # the raw layer (lsblk_ancestor_chain_raw) directly, not only through
+    # disk_name_from_partition's higher-level filtering, so a regression in
+    # the raw call is caught at its source rather than possibly being
+    # masked by something layered on top of it.
 
-    def test_root_boot_disk_single_line_output_simple_partition(self):
-        # Regression for #57 bug 2 (reported exactly as: boot disk nvme0n1,
-        # root on /dev/nvme0n1p2, no LVM/btrfs).
+    def test_lsblk_ancestor_chain_raw_returns_only_ancestors_not_children(self):
+        # Direct, low-level test of lsblk_ancestor_chain_raw itself (not
+        # disk_name_from_partition): a whole-disk device with children
+        # (partitions) must resolve to exactly its own single row via `-s`,
+        # never leaking one row per child the way an unqualified `lsblk
+        # <disk>` call would. This is the raw-parse-layer analogue of what
+        # the old `-d`/`--nodeps` flag used to guard against.
         with tempfile.TemporaryDirectory() as tmp:
             stub_dir = Path(tmp)
-            make_stub_bin(
-                stub_dir,
-                "findmnt",
-                textwrap.dedent(
-                    """
-                    if [[ "$1" == "/" ]]; then
-                      echo "/dev/nvme0n1p2"
-                      exit 0
-                    fi
-                    exit 1
-                    """
-                ),
-            )
             make_stub_bin(
                 stub_dir,
                 "lsblk",
                 textwrap.dedent(
                     """
-                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "TYPE" ]]; then
-                      case "$4" in
-                        /dev/nvme0n1p2) echo "part" ;;
-                        /dev/nvme0n1) echo "disk" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "PKNAME" ]]; then
-                      case "$4" in
-                        /dev/nvme0n1p2) echo "nvme0n1" ;;
-                        /dev/nvme0n1) echo "" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    # No -d: simulate the real bug -- lsblk lists the
-                    # whole disk's children too, one line per child.
-                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
-                      case "$3" in
-                        /dev/nvme0n1p2) echo "part" ;;
-                        /dev/nvme0n1) printf 'disk\\npart\\n' ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/nvme0n1p2) echo "nvme0n1" ;;
-                        /dev/nvme0n1) printf '\\nnvme0n1\\n' ;;
-                        *) echo "" ;;
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/nvme0n1)
+                          printf 'NAME="nvme0n1" TYPE="disk"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -490,72 +452,77 @@ class BootDiskExclusionTests(unittest.TestCase):
                 ),
             )
             result = run_bash(
-                "root_boot_disk",
+                "lsblk_ancestor_chain_raw /dev/nvme0n1",
                 extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.count("\n"), 1, repr(result.stdout))
-            self.assertEqual(result.stdout.strip(), "nvme0n1")
+            lines = [line for line in result.stdout.splitlines() if line]
+            self.assertEqual(lines, ['NAME="nvme0n1" TYPE="disk"'])
 
-    def test_root_boot_disk_single_line_output_lvm_chain(self):
-        # Regression for #57 bug 2, LVM parent-chain case: every hop
-        # (vg-root -> sda1 -> sda) must use -d so none of them return
-        # polluted multi-line TYPE/PKNAME values.
+    def test_lsblk_ancestor_chain_raw_isolation_catches_missing_dash_s_regression(self):
+        # Proof-of-isolation test, mirroring Astrid's methodology on PR #58:
+        # demonstrates that a lower-level unit test of the raw
+        # ancestor-chain parsing step (lsblk_ancestor_chain_raw) alone --
+        # with no truncation or filtering layered on top -- would catch a
+        # regression where `-s`/`--inverse` is accidentally dropped from
+        # the lsblk invocation. This mutates a *copy* of the real script
+        # (surgically removing only the `-s` flag from
+        # lsblk_ancestor_chain_raw's lsblk call, nothing else) and shows
+        # the raw function's own output becomes polluted with child rows --
+        # caught directly at this layer, without relying on any downstream
+        # defensive behavior in disk_name_from_partition.
+        script_text = SCRIPT.read_text(encoding="utf-8")
+        mutated_text = script_text.replace(
+            'lsblk -o NAME,TYPE -P -s "$device"',
+            'lsblk -o NAME,TYPE -P "$device"',
+            1,
+        )
+        # Sanity: the replacement actually matched something, otherwise
+        # this test would silently pass against the unmodified script.
+        self.assertNotEqual(mutated_text, script_text)
+
         with tempfile.TemporaryDirectory() as tmp:
-            stub_dir = Path(tmp)
-            make_stub_bin(
-                stub_dir,
-                "findmnt",
-                textwrap.dedent(
-                    """
-                    if [[ "$1" == "/" ]]; then
-                      echo "/dev/mapper/vg-root"
-                      exit 0
-                    fi
-                    exit 1
-                    """
-                ),
+            tmp_path = Path(tmp)
+            # Mirror the real scripts/ + config/ layout so the mutated
+            # script's own `$SCRIPT_DIR/../config/pipeline_config.sh`
+            # source line still resolves.
+            mutated_scripts_dir = tmp_path / "scripts"
+            mutated_scripts_dir.mkdir()
+            mutated_config_dir = tmp_path / "config"
+            mutated_config_dir.mkdir()
+            (mutated_config_dir / "pipeline_config.sh").write_text(
+                (ROOT / "config" / "pipeline_config.sh").read_text(encoding="utf-8"),
+                encoding="utf-8",
             )
+            mutated_script = mutated_scripts_dir / "00b_first_time_drive_setup_mutated.sh"
+            mutated_script.write_text(mutated_text, encoding="utf-8")
+
+            stub_dir = tmp_path / "bin"
+            stub_dir.mkdir()
             make_stub_bin(
                 stub_dir,
                 "lsblk",
                 textwrap.dedent(
                     """
-                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "TYPE" ]]; then
+                    # With -s: just the device's own ancestor chain.
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                      case "$5" in
+                        /dev/nvme0n1) printf 'NAME="nvme0n1" TYPE="disk"\\n' ;;
+                        *) ;;
+                      esac
+                      exit 0
+                    fi
+                    # Without -s (the regressed call this test targets):
+                    # a whole disk with children leaks one row per child,
+                    # exactly as unqualified lsblk does on a real system.
+                    if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" ]]; then
                       case "$4" in
-                        /dev/mapper/vg-root) echo "lvm" ;;
-                        /dev/sda1) echo "part" ;;
-                        /dev/sda) echo "disk" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "PKNAME" ]]; then
-                      case "$4" in
-                        /dev/mapper/vg-root) echo "sda1" ;;
-                        /dev/sda1) echo "sda" ;;
-                        /dev/sda) echo "" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    # No -d: simulate the bug for the final disk hop, which
-                    # has children (sda1, sda2) that would leak extra lines.
-                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
-                      case "$3" in
-                        /dev/mapper/vg-root) echo "lvm" ;;
-                        /dev/sda1) echo "part" ;;
-                        /dev/sda) printf 'disk\\npart\\npart\\n' ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/mapper/vg-root) echo "sda1" ;;
-                        /dev/sda1) echo "sda" ;;
-                        /dev/sda) printf '\\nsda\\nsda\\n' ;;
-                        *) echo "" ;;
+                        /dev/nvme0n1)
+                          printf 'NAME="nvme0n1" TYPE="disk"\\n'
+                          printf 'NAME="nvme0n1p1" TYPE="part"\\n'
+                          printf 'NAME="nvme0n1p2" TYPE="part"\\n'
+                          ;;
+                        *) ;;
                       esac
                       exit 0
                     fi
@@ -563,82 +530,40 @@ class BootDiskExclusionTests(unittest.TestCase):
                     """
                 ),
             )
-            result = run_bash(
-                "root_boot_disk",
-                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
+            env = {
+                **os.environ,
+                "HD_PATH": str(ROOT / "_unused_hd_path"),
+                "REPORT_DIR": str(ROOT / "_unused_report_dir"),
+                "PATH": f"{stub_dir}:{os.environ['PATH']}",
+            }
+            script = textwrap.dedent(
+                f"""
+                set -euo pipefail
+                source "{mutated_script}"
+                lsblk_ancestor_chain_raw /dev/nvme0n1
+                """
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.count("\n"), 1, repr(result.stdout))
-            self.assertEqual(result.stdout.strip(), "sda")
-
-    def test_root_boot_disk_single_line_output_btrfs_subvolume(self):
-        # Regression for #57 bug 2, btrfs subvolume case: the bracket-suffix
-        # must be stripped and the remaining hop(s) must use -d.
-        with tempfile.TemporaryDirectory() as tmp:
-            stub_dir = Path(tmp)
-            make_stub_bin(
-                stub_dir,
-                "findmnt",
-                textwrap.dedent(
-                    """
-                    if [[ "$1" == "/" ]]; then
-                      echo "/dev/sda2[/@]"
-                      exit 0
-                    fi
-                    exit 1
-                    """
-                ),
+            lines = [line for line in result.stdout.splitlines() if line]
+            # With -s dropped, the raw layer itself now returns the disk's
+            # children too -- caught here directly, at the point of the
+            # raw lsblk call, independent of anything downstream.
+            self.assertGreater(
+                len(lines),
+                1,
+                "expected the mutated (missing -s) raw call to leak child "
+                f"rows, proving this isolated test would catch the "
+                f"regression; got: {lines!r}",
             )
-            make_stub_bin(
-                stub_dir,
-                "lsblk",
-                textwrap.dedent(
-                    """
-                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "TYPE" ]]; then
-                      case "$4" in
-                        /dev/sda2) echo "part" ;;
-                        /dev/sda) echo "disk" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-d" && "$2" == "-no" && "$3" == "PKNAME" ]]; then
-                      case "$4" in
-                        /dev/sda2) echo "sda" ;;
-                        /dev/sda) echo "" ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    # No -d: simulate the bug -- sda has children (sda1,
-                    # sda2), so listing it without -d leaks extra lines.
-                    if [[ "$1" == "-no" && "$2" == "TYPE" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "part" ;;
-                        /dev/sda) printf 'disk\\npart\\npart\\n' ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                      case "$3" in
-                        /dev/sda2) echo "sda" ;;
-                        /dev/sda) printf '\\nsda\\nsda\\n' ;;
-                        *) echo "" ;;
-                      esac
-                      exit 0
-                    fi
-                    exit 1
-                    """
-                ),
-            )
-            result = run_bash(
-                "root_boot_disk",
-                extra_env={"PATH": f"{stub_dir}:{os.environ['PATH']}"},
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.count("\n"), 1, repr(result.stdout))
-            self.assertEqual(result.stdout.strip(), "sda")
 
 
 class FilesystemTypeDetectionTests(unittest.TestCase):
@@ -889,11 +814,13 @@ class FullScriptDetectionFlowTests(unittest.TestCase):
             "lsblk",
             textwrap.dedent(
                 """
-                [[ "$1" == "-d" ]] && shift
-                if [[ "$1" == "-no" && "$2" == "PKNAME" ]]; then
-                  case "$3" in
-                    /dev/sda2) echo "sda" ;;
-                    *) echo "" ;;
+                if [[ "$1" == "-o" && "$2" == "NAME,TYPE" && "$3" == "-P" && "$4" == "-s" ]]; then
+                  case "$5" in
+                    /dev/sda2)
+                      printf 'NAME="sda2" TYPE="part"\\n'
+                      printf 'NAME="sda" TYPE="disk"\\n'
+                      ;;
+                    *) ;;
                   esac
                   exit 0
                 fi
