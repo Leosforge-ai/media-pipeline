@@ -845,3 +845,72 @@ were both anticipated and resolved deliberately rather than defaulted into.
 Astrid review as required, matching the rigor of the prior two ports in this series. Part of #76 and
 #77; not closing either — `13_dedupe_live_photos.sh` and Phase 0c/0d remain, and Phase 2 wiring is
 still future work.
+
+## Phase 0b (concluded) — Dart port of `13_dedupe_live_photos.sh` (2026-07-14)
+
+**Context:** Fourth and FINAL confirm-gated destructive script in issue #76/#77's Phase 0b (after
+`11_restore_from_trash.sh` PR #82, `06_delete_duplicates.sh` PR #86, and
+`12_clean_immich_takeout_duplicates.sh` PR #87). This script finds Apple Live Photo still+video
+pairs that Google Takeout split apart (same directory + basename), verifies the video's duration
+via `ffprobe` (`<=5s`), falling back to file-mtime proximity (`<=5s` apart) only when `ffprobe`
+can't report a duration at all, and moves the redundant video to `media_trash`, keeping the still
+untouched.
+**Decisions:**
+- Added `lib/src/dedupe_live_photos.dart`: `pairStillsAndVideos` (pure same-directory/same-basename
+  still+video pairing, mirroring `process_directory`'s associative-array bookkeeping exactly, never
+  matching across directories), `evaluateVideoDuration` (pure numeric-duration regex/threshold
+  check, mirroring Bash's `^[0-9]+(\.[0-9]+)?$` regex exactly rather than a general float parser),
+  `evaluateLivePhotoPair` (the pure `evaluate_pair` priority-order port — duration first, timestamp
+  fallback only when duration is unknown — with zero filesystem/subprocess dependency), and
+  `LivePhotoDedupeCleaner.run` (the async orchestration walking every directory under the target,
+  shelling out to `ffprobe` via an overridable `VideoDurationReader` seam mirroring Bash's own
+  `$FFPROBE_BIN` override, and delegating the actual move to the shared `SafeFileMover`). Same
+  "port the logic, defer the wiring" pattern as the three prior ports: `pipeline_models.dart` /
+  `media_pipeline_app.dart` are untouched, and the actual executed pipeline step still shells out to
+  the real `scripts/13_dedupe_live_photos.sh`.
+- **Non-negotiable priority order preserved exactly:** a known-too-long duration
+  (`DurationVerification.tooLong`) is a terminal rejection inside `evaluateLivePhotoPair` — it
+  returns immediately without ever consulting the still/video mtimes, so a known-too-long duration
+  can never be overridden by the timestamp-proximity fallback, matching the original Bash script's
+  own explicit design decision (reviewed on issue #60 / PR #61). A dedicated regression test asserts
+  this holds even when the two files' mtimes are identical.
+- **Typed confirmation phrase:** like `12`, this script gates confirm mode on typing the exact
+  phrase `"MOVE LIVE PHOTO VIDEOS"`. `kLivePhotoDedupeConfirmPhrase`/
+  `isLivePhotoDedupeConfirmationPhraseValid` are ported and unit-tested ahead of Phase 2 wiring;
+  `LivePhotoDedupeCleaner.run` still takes a plain `confirm` bool, matching the series' precedent.
+- **Trash-move collision-handling deviation (intentional, documented, same as PRs #86/#87):** this
+  port uses `SafeFileMover.moveNoClobber` (skip-on-collision) rather than the Bash script's own
+  `unique_destination` numbered-suffix scheme. Deliberate, safety-neutral-or-safer, and does not
+  affect the verify/skip decision logic the parity test verifies.
+- **Explicit non-goal preserved:** this port never attempts to re-link the still+video pair as a
+  single Immich "Live Photo" asset via metadata (`QuickTime:ContentIdentifier` etc). It only decides
+  which video is redundant and moves it — the still is always left as a plain photo, matching the
+  original script's own out-of-scope boundary from #60.
+**Verification:** `test/dedupe_live_photos_test.dart` (33 tests): `pairStillsAndVideos`
+same-directory-only pairing/case-insensitivity/no-extension/no-paired-still tests;
+`evaluateVideoDuration` boundary and Bash-regex-rejection-form tests (negative, exponent, leading
+dot); `evaluateLivePhotoPair` tests including the safety-critical "known-too-long duration wins even
+when timestamps are identical" regression guard; `LivePhotoDedupeCleaner` dry-run/confirm/
+no-clobber/missing-still/cross-directory-non-matching/spaces-and-unicode behavior. Highest-value
+test: a **Bash-vs-Dart parity test** that runs the real `scripts/13_dedupe_live_photos.sh` (via
+`Process.run`, with `FFPROBE_BIN` pointed at the same fake-ffprobe stub protocol
+`tests/test_shell_scripts.py`'s own `write_fake_ffprobe` uses) against a synthetic fixture covering
+all five required scenarios — a valid short-duration pair, an over-duration video (rejected), a
+missing-still case (skipped), a duration-unknown pair within timestamp proximity (fallback accepts),
+and a duration-unknown pair NOT within proximity (fallback rejects) — and asserts identical
+per-video decisions and identical `Candidates inspected`/`Verified pairs`/`Missing paired
+still`/`Video too long`/`Duration unknown (total)`/`Skipped, ambiguous match` counters between the
+two implementations. `flutter analyze`: no issues. `flutter test`: 241/241 passing (33 new).
+`scripts/13_dedupe_live_photos.sh` itself is untouched — additive only, remains the working
+fallback.
+**Pivots:** None from the original plan.
+**Outcome:** `lib/src/dedupe_live_photos.dart` is a parity-tested, standalone Dart port of
+`13_dedupe_live_photos.sh`'s decision logic, ready for Phase 2 wiring. PR flags Cody + Astrid review
+as required, matching the rigor of the prior three ports in this series. **This completes Phase 0b
+of issue #76/#77: all four confirm-gated destructive scripts (`11_restore_from_trash.sh`,
+`06_delete_duplicates.sh`, `12_clean_immich_takeout_duplicates.sh`, and
+`13_dedupe_live_photos.sh`) are now ported to Dart, each logic-only/unwired with its own real
+Bash-vs-Dart parity test.** Part of #76 and #77; not closing either — next up is Phase 0c (decide
+the fate of `04_stitch_metadata.py`: keep as an external Python dependency vs. port to Dart) or,
+alternatively, the actual app-wiring phase (Phase 2: replacing the Bash subprocess calls in
+`pipeline_models.dart`/`media_pipeline_app.dart` with these Dart implementations).
