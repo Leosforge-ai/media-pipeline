@@ -139,6 +139,17 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   // "delete-confirm" — see PipelineStep.requiresDuplicateThumbnailReview.
   bool _dedupReviewAcknowledged = false;
 
+  // Union of original-report indices (see `DuplicateReviewSample.
+  // shownIndices`) the human has actually had displayed in the thumbnail
+  // review dialog for the *current* "delete-dry-run" output, across
+  // possibly more than one sample batch (issue #53). Reset together with
+  // `_dedupReviewAcknowledged` whenever a fresh dry-run starts, for the
+  // same reason: a new duplicate set invalidates any prior coverage.
+  // Purely informational — it never gates `canRunStep()`, which still only
+  // requires `_dedupReviewAcknowledged` (opening the dialog once), so this
+  // is additive framing on top of an unchanged gate, not a new gate.
+  Set<int> _dedupReviewedIndices = {};
+
   PipelineStep get _selectedStep => _steps[_selectedIndex];
 
   @override
@@ -298,8 +309,10 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       _states[step.id] = const StepRunState(status: PipelineStepStatus.running);
       if (step.id == 'delete-dry-run') {
         // A fresh dry-run can produce a different duplicate set, so any
-        // earlier thumbnail-review acknowledgment no longer applies.
+        // earlier thumbnail-review acknowledgment — and any sample-coverage
+        // tracking (#53) — no longer applies.
         _dedupReviewAcknowledged = false;
+        _dedupReviewedIndices = {};
       }
     });
 
@@ -461,6 +474,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
           if (step.id == 'delete-dry-run') {
             // Same invalidation rule as the manual single-step run path.
             _dedupReviewAcknowledged = false;
+            _dedupReviewedIndices = {};
           }
         });
       },
@@ -547,8 +561,22 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     });
     await showDialog<void>(
       context: context,
-      builder: (context) =>
-          _DuplicateThumbnailReviewDialog(dryRunOutput: dryRunLog),
+      builder: (context) => _DuplicateThumbnailReviewDialog(
+        dryRunOutput: dryRunLog,
+        initialReviewedIndices: _dedupReviewedIndices,
+        // Updated live as the human requests additional sample batches
+        // (#53), not only when the dialog closes, so a coverage panel
+        // reading `_dedupReviewedIndices` from outside the dialog can never
+        // show a stale percentage even if the app is torn down mid-review.
+        onReviewedIndicesChanged: (indices) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _dedupReviewedIndices = indices;
+          });
+        },
+      ),
     );
   }
 
@@ -708,6 +736,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                           PipelineStepStatus.succeeded,
                   dedupReviewAcknowledged: _dedupReviewAcknowledged,
                   dedupDryRunLog: _states['delete-dry-run']?.log,
+                  dedupReviewedCount: _dedupReviewedIndices.length,
                   onOpenDedupReview: _selectedStep.requiresDuplicateThumbnailReview
                       ? _openDedupReviewDialog
                       : null,
@@ -2231,6 +2260,7 @@ class _StepDetail extends StatelessWidget {
     this.dryRunSucceeded = true,
     this.dedupReviewAcknowledged = false,
     this.dedupDryRunLog,
+    this.dedupReviewedCount = 0,
     this.onOpenDedupReview,
   });
 
@@ -2254,6 +2284,12 @@ class _StepDetail extends StatelessWidget {
   /// count / preview summary without opening the review dialog. Only read
   /// when `step.requiresDuplicateThumbnailReview` is true.
   final String? dedupDryRunLog;
+
+  /// Count of distinct pairs the human has actually had displayed across
+  /// every sample batch reviewed so far for the current dry-run output
+  /// (#53). Only meaningful when `step.requiresDuplicateThumbnailReview`
+  /// is true; purely informational, never a gate input.
+  final int dedupReviewedCount;
 
   /// Opens the thumbnail-diff review dialog. Non-null only when
   /// `step.requiresDuplicateThumbnailReview` is true.
@@ -2324,6 +2360,7 @@ class _StepDetail extends StatelessWidget {
               pairCount: parseDuplicateDryRunOutput(
                 dedupDryRunLog ?? '',
               ).pairs.length,
+              reviewedCount: dedupReviewedCount,
               onOpenReview: onOpenDedupReview,
             ),
           ],
@@ -2476,24 +2513,42 @@ String _failureTitle(ImmichConnectionIssue issue) {
 }
 
 /// Inline summary + entry point for the thumbnail-diff duplicate review
-/// (#49), shown on the "delete-confirm" step's detail panel.
+/// (#49), shown on the "delete-confirm" step's detail panel — directly
+/// above the "Run Confirm" button, so it's the last thing seen before the
+/// confirm action, not something a skim past a dialog header could miss.
+///
+/// Per #53 (follow-up from Astrid's #52 review): once reviewed, this panel
+/// always states the reviewed-vs-total pair count as an explicit
+/// percentage right here, and a coverage chip color-codes how much of the
+/// duplicate set that percentage represents. This is framing only — it
+/// never changes what unlocks "Run Confirm"; the gate mechanics in
+/// `canRunStep()` are unchanged (still just "was the dialog opened").
 class _DedupReviewPanel extends StatelessWidget {
   const _DedupReviewPanel({
     required this.dryRunSucceeded,
     required this.acknowledged,
     required this.pairCount,
+    required this.reviewedCount,
     required this.onOpenReview,
   });
 
   final bool dryRunSucceeded;
   final bool acknowledged;
   final int pairCount;
+
+  /// Distinct pairs actually displayed across every sample batch reviewed
+  /// so far for the current dry-run output.
+  final int reviewedCount;
   final VoidCallback? onOpenReview;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final coveragePercent = duplicateReviewCoveragePercent(
+      reviewedCount,
+      pairCount,
+    );
 
     final String message;
     if (!dryRunSucceeded) {
@@ -2502,15 +2557,28 @@ class _DedupReviewPanel extends StatelessWidget {
           'thumbnail review.';
     } else if (acknowledged) {
       message =
-          'Reviewed for the current dry-run output ($pairCount proposed '
-          'pair${pairCount == 1 ? '' : 's'}). Re-run the dry-run step if the '
-          'duplicate set changes; re-review before confirming again.';
+          'Re-run the dry-run step if the duplicate set changes; re-review '
+          'before confirming again.';
     } else {
       message =
           'Before you can confirm, review side-by-side thumbnails of every '
           'proposed keep/trash pair ($pairCount found, or a sample for '
           'large runs) so you can trust the move plan without reading raw '
           'Czkawka text output.';
+    }
+
+    // Coverage-severity color: this is purely a visual trust signal (never
+    // a gate) so a human weighing "should I look at more before I confirm"
+    // has an immediate, hard-to-miss read at a glance.
+    final Color coverageColor;
+    if (!acknowledged) {
+      coverageColor = colorScheme.error;
+    } else if (coveragePercent >= 100) {
+      coverageColor = colorScheme.primary;
+    } else if (coveragePercent >= 50) {
+      coverageColor = Colors.orange;
+    } else {
+      coverageColor = colorScheme.error;
     }
 
     return DecoratedBox(
@@ -2543,6 +2611,37 @@ class _DedupReviewPanel extends StatelessWidget {
                 ),
               ],
             ),
+            if (acknowledged) ...[
+              const SizedBox(height: 8),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: coverageColor.withValues(alpha: 0.12),
+                  border: Border.all(color: coverageColor),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.pie_chart, size: 16, color: coverageColor),
+                      const SizedBox(width: 6),
+                      Text(
+                        'You reviewed $reviewedCount of $pairCount pairs '
+                        '($coveragePercent%) before confirming.',
+                        style: textTheme.bodyMedium?.copyWith(
+                          color: coverageColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             Text(message, style: textTheme.bodySmall),
             const SizedBox(height: 8),
@@ -2568,21 +2667,101 @@ class _DedupReviewPanel extends StatelessWidget {
 /// bash script's own Czkawka-report parsing) and renders a sampled subset
 /// via [sampleDuplicateReviewPairs], always showing an honest "N of M"
 /// count so nothing is silently hidden from large runs.
-class _DuplicateThumbnailReviewDialog extends StatelessWidget {
-  const _DuplicateThumbnailReviewDialog({required this.dryRunOutput});
+///
+/// #53: for a large duplicate set, the initial sample alone can cover a
+/// small slice of the total (e.g. 20 of 143 ≈ 14%). This dialog now also
+/// tracks cumulative reviewed coverage across every batch shown so far —
+/// starting from [initialReviewedIndices], which lets a re-opened dialog
+/// resume from where a prior review session left off instead of resetting
+/// — and offers a "Review Another Sample" button so a human who wants more
+/// confidence than the first batch gives can page through additional,
+/// non-overlapping batches before confirming. This is opt-in, extra
+/// context: it never changes when the confirm gate unlocks (still "the
+/// dialog was opened at least once" — see `canRunStep()`), only how
+/// informed the human can choose to be before they use that unlock.
+class _DuplicateThumbnailReviewDialog extends StatefulWidget {
+  const _DuplicateThumbnailReviewDialog({
+    required this.dryRunOutput,
+    this.initialReviewedIndices = const {},
+    this.onReviewedIndicesChanged,
+  });
 
   final String dryRunOutput;
+  final Set<int> initialReviewedIndices;
+  final ValueChanged<Set<int>>? onReviewedIndicesChanged;
+
+  @override
+  State<_DuplicateThumbnailReviewDialog> createState() =>
+      _DuplicateThumbnailReviewDialogState();
+}
+
+class _DuplicateThumbnailReviewDialogState
+    extends State<_DuplicateThumbnailReviewDialog> {
+  late final List<DuplicateReviewPair> _allPairs;
+  late Set<int> _reviewedIndices;
+  late DuplicateReviewSample _sample;
+  int _batchNumber = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _allPairs = parseDuplicateDryRunOutput(widget.dryRunOutput).pairs;
+    _reviewedIndices = {...widget.initialReviewedIndices};
+    // Always show a fresh batch on open rather than re-displaying whatever
+    // was on screen last time — draws from indices not yet reviewed first,
+    // so re-opening the dialog after a partial review keeps making
+    // progress instead of repeating the same pairs.
+    _sample = sampleAdditionalDuplicateReviewPairs(
+      _allPairs,
+      _reviewedIndices,
+      batchNumber: _batchNumber,
+    );
+    _reviewedIndices.addAll(_sample.shownIndices);
+    // Deferred to after this frame: initState() runs while the framework
+    // is still building the dialog's route, so calling setState() on the
+    // ancestor _PipelineHomePageState synchronously here would hit a
+    // "setState() called during build" error. A post-frame callback is
+    // safe because by then the current build pass has finished.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _notifyReviewedIndicesChanged(),
+    );
+  }
+
+  void _notifyReviewedIndicesChanged() {
+    widget.onReviewedIndicesChanged?.call({..._reviewedIndices});
+  }
+
+  bool get _hasMoreToReview => _reviewedIndices.length < _allPairs.length;
+
+  void _reviewAnotherSample() {
+    setState(() {
+      _batchNumber += 1;
+      _sample = sampleAdditionalDuplicateReviewPairs(
+        _allPairs,
+        _reviewedIndices,
+        batchNumber: _batchNumber,
+      );
+      _reviewedIndices.addAll(_sample.shownIndices);
+    });
+    _notifyReviewedIndicesChanged();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final parsed = parseDuplicateDryRunOutput(dryRunOutput);
-    final sample = sampleDuplicateReviewPairs(parsed.pairs);
+    final parsedOrphanCount = parseDuplicateDryRunOutput(
+      widget.dryRunOutput,
+    ).orphanTrashLineCount;
+    final sample = _sample;
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
+    final cumulativeCoveragePercent = duplicateReviewCoveragePercent(
+      _reviewedIndices.length,
+      _allPairs.length,
+    );
 
     return Dialog(
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 640),
+        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 680),
         child: Padding(
           padding: const EdgeInsets.all(20),
           child: Column(
@@ -2609,16 +2788,31 @@ class _DuplicateThumbnailReviewDialog extends StatelessWidget {
                     ? 'No keep/trash pairs were found in the dry-run output.'
                     : sample.isSampled
                     ? 'Showing ${sample.shown.length} of ${sample.totalPairs} '
-                          'pairs — full list in the dry-run report.'
-                    : 'Showing all ${sample.totalPairs} '
-                          'pair${sample.totalPairs == 1 ? '' : 's'}.',
+                          'pairs (batch ${_batchNumber + 1}) — full list in '
+                          'the dry-run report.'
+                    : 'Showing all ${sample.shown.length} '
+                          'pair${sample.shown.length == 1 ? '' : 's'}.',
                 style: textTheme.bodySmall,
               ),
-              if (parsed.orphanTrashLineCount > 0) ...[
+              if (sample.totalPairs > 0) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'Cumulative: reviewed ${_reviewedIndices.length} of '
+                  '${_allPairs.length} pairs ($cumulativeCoveragePercent%) '
+                  'across every batch you\'ve opened.',
+                  style: textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: cumulativeCoveragePercent >= 100
+                        ? colorScheme.primary
+                        : colorScheme.error,
+                  ),
+                ),
+              ],
+              if (parsedOrphanCount > 0) ...[
                 const SizedBox(height: 4),
                 Text(
-                  '${parsed.orphanTrashLineCount} "Would trash" line'
-                  '${parsed.orphanTrashLineCount == 1 ? '' : 's'} could not '
+                  '$parsedOrphanCount "Would trash" line'
+                  '${parsedOrphanCount == 1 ? '' : 's'} could not '
                   'be matched to a kept file and are not shown here; open '
                   'the dry-run report to inspect them.',
                   style: textTheme.bodySmall?.copyWith(
@@ -2641,6 +2835,18 @@ class _DuplicateThumbnailReviewDialog extends StatelessWidget {
                         },
                       ),
               ),
+              if (_hasMoreToReview) ...[
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _reviewAnotherSample,
+                  icon: const Icon(Icons.refresh),
+                  label: Text(
+                    'Review Another Sample '
+                    '(${_allPairs.length - _reviewedIndices.length} pairs '
+                    'not yet reviewed)',
+                  ),
+                ),
+              ],
             ],
           ),
         ),
