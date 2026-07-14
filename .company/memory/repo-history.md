@@ -74,3 +74,27 @@ twice (boot-disk exclusion: #56 then #58), the third fix should seriously
 consider replacing the underlying primitive rather than patching again —
 this is what #59 did, and it fully closed the bug class rather than adding
 a third patch.
+
+## 2026-07-14 — Merged backlog of Dependabot PRs, found + fixed a real gitleaks CI bug (#73/PR #74)
+
+Reviewed 5 stale Dependabot GitHub Actions version-bump PRs (#40, #44, #45,
+#46, #47). Updated each branch against current `main` to force a fresh CI
+run rather than trusting stale check results. #40/#44/#45/#46 came back
+fully clean and were merged. #47 hit a `gitleaks` job failure — investigated
+rather than dismissed as flaky or bypassed: `.github/workflows/gitleaks.yml`
+installed the gitleaks CLI via unpinned `go install .../gitleaks/v8@latest`
+against a hardcoded `go-version: '1.21'`; gitleaks had shipped v8.30.1
+(requires Go >= 1.24.11), breaking the install intermittently across *any*
+PR, unrelated to #47's actual content. Filed #73, fixed via PR #74: pinned
+`GITLEAKS_VERSION: v8.30.1` and tightened `go-version` to the exact patch
+`'1.24.13'` (not just minor `'1.24'`) after review flagged that
+`actions/setup-go`'s toolchain caching could otherwise resolve to an older,
+incompatible patch — closing the same floating-version bug class the fix
+was meant to prevent. Verified live: the `gitleaks` job itself ran green
+after the fix, not just in theory. #47 then re-checked clean and merged.
+
+**Lesson**: a mandatory security-scanning CI check failing is worth
+investigating even when the PR's content looks unrelated — "gitleaks
+cannot be bypassed" held here, and the investigation found a real,
+previously-unnoticed CI fragility affecting the whole repo's PR flow, not
+a false positive to wave through.
