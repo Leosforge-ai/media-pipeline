@@ -36,3 +36,41 @@ While verifying the fixes above against the owner's actual ~1.8TB library, disco
 **Lesson for future dedup-adjacent work on this repo:** folder-name/ratio heuristics alone are not sufficient trust signal for a completed `--confirm` run on real family-photo data — exhaustive hash verification against the *entire* current library (not just the same-named folder) is what actually caught the gap. The thumbnail-diff review UI (#49) now prevents this class of issue going forward for new runs; this incident predated it.
 
 Evidence: media-pipeline #48–#63 and their PRs; ad-hoc diagnostic scripts (not committed — one-off, delivered directly to the repo owner) used for the real-data audit are described in this Claude Code session's memory, not in this repo.
+
+## 2026-07-14 — Closed all 4 follow-up issues from the pipeline-trust pass
+
+Same Sofie → Cody + Astrid review → merge pattern. Sequenced #51/#53/#54 on
+the same Flutter files (one at a time to avoid conflicts); #59 ran
+independently (bash-only).
+
+- #51/PR #67 — guided-run checkpoint persistence (`GuidedRunCheckpointStore`,
+  local JSON, staleness = hdPath/reportDir match + 7-day age) and
+  retry-from-failed-step instead of restarting the whole segment.
+  `GuidedRunController.run()` itself untouched — confirm-gate invariant
+  unaffected, confirmed by both reviewers.
+- #59/PR #66 — replaced boot-disk-exclusion's manual PKNAME chain-walking
+  (patched twice already, #56/#58) with a single `lsblk -s`/`--inverse` call,
+  eliminating the whole bug class structurally instead of patching a third
+  time. Astrid live-verified `lsblk -s` behavior on real hardware.
+- #53/PR #69 — dedup review dialog gained a prominent coverage banner
+  ("N of M pairs (X%)") plus a "Review Another Sample" button for additional
+  non-overlapping batches. Deliberately did NOT make the confirm gate
+  stricter (informational only) — judged the right call for the issue's
+  actual intent (false-confidence framing, not a harder gate).
+- #54/PR #71 — `PipelineRunner` gained a dedicated stdout-only capture
+  (`stdoutOutput`/`stdoutLog`, additive alongside the existing merged
+  buffer) so the dedup parser can never be affected by interleaved stderr,
+  closing a theoretical risk structurally rather than patching the parser
+  alone. First review round found the regression test was a false proof
+  (Cody empirically showed it passed even without the fix) — fixed with a
+  real mid-pair stderr interleave, re-verified independently by Cody.
+
+Follow-ups filed, non-blocking: #68 (retry-resume can't detect content
+drift outside the guided flow), #70 (dedup coverage % could feel more
+falsely reassuring than the old vague count on very large duplicate sets).
+
+**Pattern reinforced**: when the same safety-critical function gets patched
+twice (boot-disk exclusion: #56 then #58), the third fix should seriously
+consider replacing the underlying primitive rather than patching again —
+this is what #59 did, and it fully closed the bug class rather than adding
+a third patch.
