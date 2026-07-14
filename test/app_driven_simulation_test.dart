@@ -80,8 +80,10 @@ void main() {
 
     // The review UI parses this exact dry-run output; prove against the
     // real script's stdout (not a hand-written fixture) that it extracts
-    // the same keep/trash pair the script itself will act on.
-    final parsed = parseDuplicateDryRunOutput(dryRun.output);
+    // the same keep/trash pair the script itself will act on. Use
+    // `stdoutOutput` (stdout-only), matching the app's own call sites
+    // (`_openDedupReviewDialog`, the pair-count preview) — see issue #54.
+    final parsed = parseDuplicateDryRunOutput(dryRun.stdoutOutput);
     expect(parsed.orphanTrashLineCount, 0);
     expect(parsed.pairs, [
       DuplicateReviewPair(keepPath: keep.path, trashPath: trash.path),

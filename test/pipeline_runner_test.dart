@@ -81,6 +81,125 @@ void main() {
     expect(result.output, contains('typed=<empty>'));
   });
 
+  group('stdout/stderr separation (issue #54)', () {
+    Future<Directory> makeTempRoot(String prefix) async {
+      final dir = await Directory.systemTemp.createTemp(prefix);
+      addTearDown(() async {
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+        }
+      });
+      return dir;
+    }
+
+    test(
+      'stdoutOutput contains only stdout lines even when stderr is '
+      'heavily interleaved between them',
+      () async {
+        final tempRoot = await makeTempRoot('pipeline-runner-streams-');
+        final script = File('${tempRoot.path}/interleave.sh');
+        // Deliberately interleaves stdout and stderr writes, each flushed
+        // immediately, to simulate a script that (unlike
+        // `06_delete_duplicates.sh` today) writes to stderr on its success
+        // path in between "Keep:"/"Would trash:" stdout announcements —
+        // the exact scenario issue #54 warns could theoretically mispair a
+        // stale "Keep:" with an unrelated "Would trash:" if a parser ever
+        // read the merged stream.
+        await script.writeAsString('''
+#!/usr/bin/env bash
+set -euo pipefail
+echo "Keep: /staging/groupA/keep.jpg"
+echo "stderr noise A" >&2
+echo "Would trash: /staging/groupA/trash.jpg"
+echo "stderr noise B" >&2
+echo ""
+echo "Keep: /staging/groupB/keep.jpg"
+echo "stderr noise C" >&2
+echo "Would trash: /staging/groupB/trash.jpg"
+''');
+
+        final runner = PipelineRunner(workingDirectory: tempRoot.path);
+        final step = PipelineStep(
+          id: 'interleave',
+          title: 'interleave',
+          description: 'interleave',
+          risk: PipelineRisk.safe,
+          command: PipelineCommand('bash', [script.path]),
+        );
+
+        final result = await runner.run(
+          step,
+          const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+        );
+
+        expect(result.succeeded, isTrue);
+
+        // The safety-relevant stdout-only capture never contains any
+        // stderr content.
+        expect(result.stdoutOutput, isNot(contains('stderr noise')));
+        expect(
+          result.stdoutOutput,
+          contains('Keep: /staging/groupA/keep.jpg'),
+        );
+        expect(
+          result.stdoutOutput,
+          contains('Would trash: /staging/groupA/trash.jpg'),
+        );
+        expect(
+          result.stdoutOutput,
+          contains('Keep: /staging/groupB/keep.jpg'),
+        );
+        expect(
+          result.stdoutOutput,
+          contains('Would trash: /staging/groupB/trash.jpg'),
+        );
+
+        // The combined buffer (still used for the live step-log UI) keeps
+        // showing everything — stderr output is never silently dropped
+        // from what a human watching the step sees.
+        expect(result.output, contains('stderr noise A'));
+        expect(result.output, contains('stderr noise B'));
+        expect(result.output, contains('stderr noise C'));
+        expect(result.output, contains('Keep: /staging/groupA/keep.jpg'));
+      },
+    );
+
+    test(
+      'onLog still receives every stdout and stderr chunk for the live '
+      'log view, unchanged from before the stdout/stderr split',
+      () async {
+        final tempRoot = await makeTempRoot('pipeline-runner-onlog-');
+        final script = File('${tempRoot.path}/both_streams.sh');
+        await script.writeAsString('''
+#!/usr/bin/env bash
+set -euo pipefail
+echo "out line"
+echo "err line" >&2
+''');
+
+        final runner = PipelineRunner(workingDirectory: tempRoot.path);
+        final step = PipelineStep(
+          id: 'both-streams',
+          title: 'both streams',
+          description: 'both streams',
+          risk: PipelineRisk.safe,
+          command: PipelineCommand('bash', [script.path]),
+        );
+
+        final loggedChunks = <String>[];
+        await runner.run(
+          step,
+          const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+          onLog: loggedChunks.add,
+        );
+
+        final loggedText = loggedChunks.join();
+        expect(loggedText, contains('out line'));
+        expect(loggedText, contains('err line'));
+      },
+    );
+  });
+
   group('GuidedRunController', () {
     late Directory tempRoot;
     late PipelineRunner runner;

@@ -301,7 +301,7 @@ class _AlwaysSucceedsRunner extends PipelineRunner {
     PipelineSettings settings, {
     LogSink? onLog,
   }) async {
-    return const PipelineRunResult(exitCode: 0, output: '');
+    return const PipelineRunResult(exitCode: 0, output: '', stdoutOutput: '');
   }
 }
 
@@ -328,7 +328,11 @@ class _CountingFakeRunner extends PipelineRunner {
     final failed = failingStepIds.contains(step.id);
     final output = failed ? '${step.id} failed\n' : '${step.id} ok\n';
     onLog?.call(output);
-    return PipelineRunResult(exitCode: failed ? 1 : 0, output: output);
+    return PipelineRunResult(
+      exitCode: failed ? 1 : 0,
+      output: output,
+      stdoutOutput: output,
+    );
   }
 }
 

@@ -342,6 +342,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
             : PipelineStepStatus.failed,
         exitCode: result.exitCode,
         log: result.output,
+        stdoutLog: result.stdoutOutput,
       );
     });
   }
@@ -491,6 +492,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                     : PipelineStepStatus.failed,
                 exitCode: stepResult.exitCode,
                 log: stepResult.output,
+                stdoutLog: stepResult.stdoutOutput,
               );
         });
       },
@@ -555,7 +557,11 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   /// This never runs any command and never touches the filesystem beyond
   /// the read-only `Image.file` thumbnails inside the dialog.
   Future<void> _openDedupReviewDialog() async {
-    final dryRunLog = _states['delete-dry-run']?.log ?? '';
+    // Stdout-only: the review dialog parses "Keep:"/"Would trash:"
+    // announcements, a safety-relevant read that must never be able to pick
+    // up an interleaved stderr line — see `StepRunState.stdoutLog` and
+    // issue #54.
+    final dryRunLog = _states['delete-dry-run']?.stdoutLog ?? '';
     setState(() {
       _dedupReviewAcknowledged = true;
     });
@@ -735,7 +741,10 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                       : _states[_selectedStep.requiresDryRunStepId]?.status ==
                           PipelineStepStatus.succeeded,
                   dedupReviewAcknowledged: _dedupReviewAcknowledged,
-                  dedupDryRunLog: _states['delete-dry-run']?.log,
+                  // Stdout-only for the same reason as `_openDedupReviewDialog`
+                  // above — this feeds the pair-count preview through the
+                  // same safety-relevant parser.
+                  dedupDryRunLog: _states['delete-dry-run']?.stdoutLog,
                   dedupReviewedCount: _dedupReviewedIndices.length,
                   onOpenDedupReview: _selectedStep.requiresDuplicateThumbnailReview
                       ? _openDedupReviewDialog

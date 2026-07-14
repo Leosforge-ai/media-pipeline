@@ -16,7 +16,20 @@ class PipelineRunner {
     PipelineSettings settings, {
     LogSink? onLog,
   }) async {
+    // `output` is the combined, live-interleaved stdout+stderr buffer that
+    // feeds the step-log UI (`StepRunState.log`) — its ordering/behavior is
+    // unchanged from before issue #54: both streams are still captured via
+    // independent listeners as they arrive, and `onLog` still fires for
+    // every chunk from either stream so a human watching a running step
+    // sees the exact same live interleaving as before.
+    //
+    // `stdoutOutput` is a second, dedicated accumulation that only ever
+    // receives stdout chunks. It exists so safety-relevant parsers (e.g.
+    // `duplicate_report.dart`'s "Keep:"/"Would trash:" parser, via
+    // `StepRunState.stdoutLog`) can read pure stdout instead of implicitly
+    // assuming `output` never contains interleaved stderr — see issue #54.
     final output = StringBuffer();
+    final stdoutOutput = StringBuffer();
     final process = await Process.start(
       step.command.executable,
       step.command.arguments,
@@ -25,14 +38,20 @@ class PipelineRunner {
       runInShell: Platform.isWindows,
     );
 
-    void capture(String chunk) {
+    void captureStdout(String chunk) {
+      stdoutOutput.write(chunk);
+      output.write(chunk);
+      onLog?.call(chunk);
+    }
+
+    void captureStderr(String chunk) {
       output.write(chunk);
       onLog?.call(chunk);
     }
 
     final subscriptions = [
-      process.stdout.transform(utf8.decoder).listen(capture),
-      process.stderr.transform(utf8.decoder).listen(capture),
+      process.stdout.transform(utf8.decoder).listen(captureStdout),
+      process.stderr.transform(utf8.decoder).listen(captureStderr),
     ];
 
     final stdinText = step.command.stdinText;
@@ -47,7 +66,11 @@ class PipelineRunner {
       for (final subscription in subscriptions) subscription.cancel(),
     ]);
 
-    return PipelineRunResult(exitCode: exitCode, output: output.toString());
+    return PipelineRunResult(
+      exitCode: exitCode,
+      output: output.toString(),
+      stdoutOutput: stdoutOutput.toString(),
+    );
   }
 }
 

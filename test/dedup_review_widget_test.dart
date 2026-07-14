@@ -290,6 +290,116 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'issue #54: a stderr line landing physically BETWEEN a real "Keep:" and '
+    'its matching "Would trash:" in the merged log must never overwrite the '
+    'pending keep and mispair the real trash target — the review dialog '
+    'must read stdout-only, not the merged log',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      // Real stdout: one clean, unambiguous pair.
+      const cleanStdout =
+          'Keep: /tmp/media-pipeline-test/keep.mp4\n'
+          'Would trash: /tmp/media-pipeline-test/trash.mp4\n';
+
+      // What the *merged* stdout+stderr log would look like if a stderr
+      // write landed between the real "Keep:" line and its matching
+      // "Would trash:" line, and that stderr text happened to itself match
+      // the "Keep: <path>" line pattern (e.g. a diagnostic tool echoing a
+      // path it's inspecting). `parseDuplicateDryRunOutput` has no concept
+      // of which stream a line came from — a second "Keep:" line always
+      // overwrites the pending keep, by design, so it can track a report's
+      // real group boundaries. If the review dialog ever parsed this
+      // merged buffer instead of stdout-only, the real "Would trash:" line
+      // would silently pair with the stderr line's path instead of the
+      // real keep — a genuine mispair, not just a harmless dangling
+      // orphan (this is the scenario issue #54 actually warns about).
+      const corruptedMerged =
+          'Keep: /tmp/media-pipeline-test/keep.mp4\n'
+          'Keep: /tmp/media-pipeline-test/stderr-injected-keep.mp4\n'
+          'Would trash: /tmp/media-pipeline-test/trash.mp4\n';
+
+      final fakeRunner = _StreamSeparatedFakePipelineRunner(
+        stdoutOutputs: {'delete-dry-run': cleanStdout},
+        mergedOutputs: {'delete-dry-run': corruptedMerged},
+      );
+
+      await tester.pumpWidget(MediaPipelineApp(runner: fakeRunner));
+
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run Step'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Move Duplicates To Trash'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review Duplicate Thumbnails'));
+      await tester.pumpAndSettle();
+
+      // Exactly one pair is shown, and it pairs the *real* keep with the
+      // *real* trash target — not the stderr-injected path that would win
+      // if the merged buffer were parsed instead of stdout-only.
+      expect(find.text('Showing all 1 pair.'), findsOneWidget);
+      expect(find.text('keep.mp4'), findsWidgets);
+      expect(find.text('trash.mp4'), findsWidgets);
+      expect(
+        find.textContaining('stderr-injected-keep'),
+        findsNothing,
+        reason:
+            'the stderr-injected "Keep:" line must never win the pairing '
+            'over the real keep target',
+      );
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+
+      // The merged log is still visible in full on the dry-run step's own
+      // detail panel (the live step-log view), so the extra content is
+      // never silently hidden from the human operator — only kept out of
+      // the safety-relevant parse above.
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('stderr-injected-keep'), findsOneWidget);
+    },
+  );
+}
+
+/// Fake runner that can return a *different* merged (stdout+stderr) log
+/// than its stdout-only capture, so tests can simulate the interleaved
+/// stderr scenario from issue #54 without spawning real processes.
+class _StreamSeparatedFakePipelineRunner extends PipelineRunner {
+  _StreamSeparatedFakePipelineRunner({
+    required this.stdoutOutputs,
+    required this.mergedOutputs,
+  }) : super(workingDirectory: '.');
+
+  /// Step id -> canned stdout-only capture (what safety parsers must read).
+  final Map<String, String> stdoutOutputs;
+
+  /// Step id -> canned merged stdout+stderr capture (what the live step-log
+  /// UI displays).
+  final Map<String, String> mergedOutputs;
+
+  @override
+  Future<PipelineRunResult> run(
+    PipelineStep step,
+    PipelineSettings settings, {
+    LogSink? onLog,
+  }) async {
+    final merged = mergedOutputs[step.id] ?? '';
+    final stdoutOnly = stdoutOutputs[step.id] ?? '';
+    onLog?.call(merged);
+    return PipelineRunResult(
+      exitCode: 0,
+      output: merged,
+      stdoutOutput: stdoutOnly,
+    );
+  }
 }
 
 class _FakePipelineRunner extends PipelineRunner {
@@ -307,6 +417,6 @@ class _FakePipelineRunner extends PipelineRunner {
   }) async {
     final output = outputs[step.id] ?? '';
     onLog?.call(output);
-    return PipelineRunResult(exitCode: 0, output: output);
+    return PipelineRunResult(exitCode: 0, output: output, stdoutOutput: output);
   }
 }
