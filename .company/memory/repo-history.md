@@ -98,3 +98,47 @@ investigating even when the PR's content looks unrelated — "gitleaks
 cannot be bypassed" held here, and the investigation found a real,
 previously-unnoticed CI fragility affecting the whole repo's PR flow, not
 a false positive to wave through.
+
+## 2026-07-14 — Cross-platform architecture scoped: two competing roadmap issues filed
+
+Following up on "is it possible to add Apple Photos/OneDrive/Dropbox" and
+"add macOS/Windows support," scoped the real difficulty gradient rather
+than treating all four as equal-sized asks:
+
+- **OneDrive/Dropbox** — cheap: both are first-class `rclone` remotes
+  already, following `03_import_gdrive.sh`'s existing pattern. No platform
+  work needed. Not yet issued — smallest, do first when picked up.
+- **Windows "support"** — recommended WSL2 over a native rewrite: the
+  existing Linux Bash scripts already work unmodified inside WSL2, at a
+  fraction of the cost of reimplementing destructive-path safety logic on
+  a different platform. Not yet issued.
+- **macOS/Windows native pipeline support + Apple Photos import** — the
+  real architecture decision. Core insight: the desktop app is already
+  Dart/Flutter and already cross-platform (Linux/macOS/Windows/ChromeOS);
+  only the *pipeline* (Bash) isn't. Proposed porting the safety-critical
+  orchestration logic (drive detection, confirm-gated dedup/restore
+  scripts, dedup parsing) from Bash to Dart — same core either way — with
+  two different answers for the four external tool dependencies
+  (`exiftool`, `ffmpeg`, `rclone`, `czkawka`):
+  - **Design A / #76 — Container Runtime**: bundle all four into one
+    Docker image, reusing the Docker dependency already required for
+    Immich. Zero Windows-specific code (Docker Desktop already runs Linux
+    containers). Accepted tradeoff: Docker Desktop's virtualized
+    bind-mount I/O will be slower than native on macOS/Windows for a
+    200GB/40,000+-file library — real cost, explicitly accepted going in.
+  - **Design B / #77 — Native Runtime**: same Dart core, but tools install
+    via apt/Homebrew/winget per OS. Full native speed everywhere, at the
+    cost of three installer/detection paths to maintain — flagged as the
+    same failure shape as the boot-disk-exclusion saga (#56→#58→#59), just
+    now in testable Dart rather than Bash text-parsing.
+
+Both issues are structured as multi-phase, multi-PR roadmaps (Phase 0
+shared: the Dart port; then diverging) — **PRs against either should
+reference the issue ("Part of #76"/"Part of #77"), not close it**, since
+each issue tracks a whole rollout, not a single change. Neither design has
+been chosen yet; both filed to keep the decision visible and make either
+path immediately actionable whenever picked up.
+
+Design comparison presented as a visual artifact (not committed to this
+repo — a Claude Code artifact) rather than plain text, at Leo's request
+("something cool to show off").
