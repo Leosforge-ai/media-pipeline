@@ -722,3 +722,72 @@ none were lost. Full suite (152 tests) and `flutter analyze` both pass clean.
 **Outcome:** `SafeFileMover` is ready for the 06/12/13 ports (still Bash today, not part of this
 change) to reuse instead of each re-implementing the move-safety logic. Part of #76 and #77;
 not closing either — both stay open until those ports land.
+
+## Phase 18 — Port delete-duplicates to Dart (2026-07-14)
+
+**Context:** Phase 0b of issue #76/#77's shared roadmap continues: `06_delete_duplicates.sh` is
+the highest-stakes port in the series — the script that actually decides which file in a
+Czkawka duplicate group survives and which get moved to `$MEDIA_TRASH`. The thumbnail-diff
+review dialog (issue #49, PR #52/#69/#71) exists specifically so a human can double-check this
+exact decision before it happens for real, so this port had to preserve that trust relationship,
+not just the scoring logic.
+**Decisions:**
+- Added `lib/src/delete_duplicates.dart`: `scoreKeepPath` (pure port of `score_keep_path`,
+  same 0/5/10/12/20 scoring chain in the same order) and `decideCzkawkaReportGroups` (pure port
+  of `process_czkawka_report`'s grouping — only a line starting with a `"..."`-quoted string
+  under `stagingRoot` is ever treated as a path; report headers, dimension lines, and size
+  annotations are never misparsed as paths, per `.company/forbidden-actions.md`'s explicit rule
+  for this script). `DuplicateDeleter` wires the pure decision logic to the filesystem:
+  dry-run by default, confirm-gated moves via the shared `SafeFileMover.moveNoClobber`
+  (`filesystem_ops.dart`, from Phase 17/PR #84) rather than reimplementing move semantics.
+  Trash destination mirrors the full-original-path-minus-leading-slash convention 06/12/13
+  already use post-#62.
+- **`duplicate_report.dart` integration decision (the key design call for this port):** this PR
+  does **not** rewire `pipeline_models.dart`'s `delete-dry-run`/`delete-confirm` steps — they
+  still shell out to the real `scripts/06_delete_duplicates.sh`, exactly like Phase 0b's earlier
+  port left `11_restore_from_trash.sh` wired as the executed script (wiring the Dart-native/
+  container execution path is Phase 2 of issue #76, not this slice). Because nothing actually
+  executing today changes, `duplicate_report.dart`'s `parseDuplicateDryRunOutput` still reads
+  the real Bash script's real stdout, completely unchanged — **zero risk to the existing
+  thumbnail-review dialog from this port landing.** For Phase 2, this module deliberately
+  follows `restore_from_trash.dart`'s precedent rather than `06`'s own stdout format:
+  `DuplicateDeleter.run` returns structured `DuplicateReportOutcome` objects (keep path + typed
+  per-file outcomes), not printed text. A helper, `renderDryRunKeepTrashLines`, renders those
+  structured outcomes into the exact `Keep: `/`Would trash: ` line format
+  `duplicate_report.dart` parses today — proven equivalent by a round-trip test — so Phase 2
+  can choose either to keep `duplicate_report.dart` as a thin compatibility parser over that
+  rendered text, or have the review UI consume `DuplicateReportOutcome` directly and retire the
+  text parser. That choice is deliberately deferred to the wiring PR, which can update the
+  review dialog's tests end-to-end at the same time; deciding it here would mean touching
+  `duplicate_report.dart`/`media_pipeline_app.dart` without the process wiring that would
+  actually exercise the new path — a half-migrated state this task was explicitly warned
+  against.
+- **Trash-move collision-handling deviation (intentional, documented):** the Bash script's own
+  `trash_file()` resolves a destination collision with a numbered suffix (`_1`, `_2`, ...) and
+  always moves. This port instead uses `SafeFileMover.moveNoClobber`, which skips the move and
+  leaves the source in place on collision (`mv -n` semantics), matching `filesystem_ops.dart`'s
+  own doc comment, which already named 06/12/13 as the intended next callers of this shared
+  primitive. This is a deliberate, safety-neutral-or-safer behavioral difference (never invents
+  a slightly-different destination filename) and does not affect the keep/trash *decision*
+  logic itself, which the parity test below verifies byte-for-byte.
+**Verification:** `test/delete_duplicates_test.dart` (29 tests): `scoreKeepPath` exact score
+values and ordering; adversarial parsing tests matching the rigor of
+`tests/test_shell_scripts.py`'s Bash coverage (report headers, dimension lines, size
+annotations, and out-of-staging quoted paths are never misread as paths); `DuplicateDeleter`
+dry-run/confirm/missing-file/no-clobber behavior; a `renderDryRunKeepTrashLines` <->
+`parseDuplicateDryRunOutput` round-trip test proving format compatibility. Highest-value test:
+a **Bash-vs-Dart parity test** that runs the real `scripts/06_delete_duplicates.sh` (via
+`Process.run`) against a synthetic Czkawka report fixture (containing a header line, a
+dimension-like line, an out-of-staging quoted path, and a real duplicate group with real files
+on disk) and asserts its `Keep:`/`Would trash:` lines match `decideCzkawkaReportGroups`'
+independently computed decision exactly. `flutter analyze`: no issues. `flutter test`: 181/181
+passing (29 new). `scripts/06_delete_duplicates.sh` itself is untouched — additive only, remains
+the working fallback.
+**Pivots:** None from the original plan; the integration-decision and collision-handling
+deviations above were both anticipated design questions, resolved deliberately rather than
+defaulted into.
+**Outcome:** `lib/src/delete_duplicates.dart` is a parity-tested, standalone Dart port of
+`06_delete_duplicates.sh`'s decision logic, ready for Phase 2 wiring. PR flags Cody + Astrid
+review as **required** (not just warranted) given this is the highest-stakes port in the
+series. Part of #76 and #77; not closing either — 12/13 and Phase 0c/0d remain, and Phase 2
+wiring (replacing the Bash subprocess calls in `pipeline_models.dart`) is still future work.
