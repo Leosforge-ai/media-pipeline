@@ -648,3 +648,44 @@ path). Restored the fix and re-ran: both tests, plus the full existing suite (47
 **Outcome:** `05_cleanup_scan.sh` now runs all four scan types and prints the summary section
 regardless of how many duplicates each scan finds, while still surfacing and aborting on a
 genuine `czkawka_cli` crash or invocation failure. Closes #81.
+
+## Phase 16 — PR #83 review fixes: signal-death exit codes + exit-code terminology (2026-07-14)
+
+**Context:** Astrid and Cody's reviews of PR #83 (Phase 15) each found a gap.
+Astrid: the fatal-exit-code allowlist (`101`/`126`/`127`) didn't cover the standard Unix
+signal-death convention (a process killed by signal N exits with code `128+N`) — so `137`
+(SIGKILL, most commonly an OOM-kill) or `139` (SIGSEGV) would have been silently classified as
+"just found N duplicates" and a truncated/corrupt report trusted as complete. This matters
+concretely, not just in theory: `czkawka_cli` is planned to run inside a memory-limited Docker
+container per #76's roadmap (PR #80, already merged), where OOM-kills become materially more
+likely. Cody: pulled czkawka's actual upstream source (`czkawka_cli/src/main.rs`) and found the
+real "found duplicates" exit code is a **fixed constant, `11`** — not a variable found-count as
+Phase 15's comments, HISTORY entry, and test double all described. This didn't change Phase
+15's fix correctness (11 still lands in the "keep going" bucket either way), but the
+terminology was wrong.
+**Decisions:** Replaced the allowlist-of-known-fatal-codes approach with a denylist-of-
+known-safe-codes approach: only `0` (nothing found) and `11` (czkawka's real, fixed
+found-duplicates sentinel) are now treated as non-fatal; every other exit code aborts the
+script. This is both more correct (matches czkawka's actual, narrow exit-code contract) and
+fail-closed by construction — it automatically covers `137`/`139`/any other signal-death code
+(`128+N`) and any other unrecognized code, without needing to enumerate every possible crash
+mode. Kept `101`/`126`/`127` and the `128-255` signal-death range documented inline as known,
+named failure modes for diagnostic value, even though the actual conditional no longer needs to
+special-case them. Corrected all "found-count" language in the script's comments to describe
+the real fixed-`11` sentinel. Updated the fake `czkawka_cli` test double to exit `11` (not an
+arbitrary group count) when it plants duplicate groups, so it accurately models real czkawka
+behavior.
+**Verification:** Added `test_signal_death_exit_code_still_aborts_the_script`
+(`CleanupScanExitCodeTests`), parametrized over `137` and `139`, asserting the script aborts
+before the video scan or summary. Confirmed this test would have caught the gap: ran it against
+Phase 15's original fix commit (`9077097`) — both parametrized cases failed
+(`AssertionError: 0 == 0`, i.e. the script exited successfully on a simulated OOM-kill/segfault
+instead of aborting). Restored the corrected script and re-ran: full suite (48 tests total),
+`shellcheck -x -e SC1091`, `shfmt -d`, and `ruff check` all pass clean.
+**Pivots:** Switched from an allowlist of known-fatal codes to a denylist of known-safe codes
+(`{0, 11}`), per Astrid's signal-death finding and Cody's fixed-sentinel finding together —
+once the real exit-code contract is only two values, fail-closed on everything else is both
+simpler and safer than continuing to enumerate failure modes.
+**Outcome:** `05_cleanup_scan.sh` now correctly treats only `0`/`11` as non-fatal and aborts on
+any other exit code, including OOM-kills and other signal deaths inside the planned container
+environment. PR #83 updated accordingly; still open for final review, not merged.

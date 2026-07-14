@@ -258,12 +258,15 @@ def write_fake_czkawka_tools(root: Path) -> Path:
     The fake czkawka_cli does real work: it hashes the actual files under
     the given -d directory and writes real duplicate groups to -f, in
     Czkawka's real report format (a "Found N <noun>" header per group,
-    followed by quoted absolute paths) -- then exits with the group count,
-    mirroring czkawka_cli's real found-count exit code semantics (a
-    scan that finds N groups of duplicates exits non-zero with N, not 0/1
-    success-flag semantics). This means the regression test below exercises
-    the real pipefail/PIPESTATUS interaction against planted duplicate
-    files, not a mocked exit code (issue #81).
+    followed by quoted absolute paths) -- then exits with czkawka_cli's
+    real, fixed exit-code sentinels: 0 when no duplicate group was found,
+    11 when at least one was (confirmed against czkawka_cli/src/main.rs
+    upstream -- 11 is a fixed "found duplicates" constant, not a variable
+    count of how many groups were found, despite how it reads at a
+    glance). This means the regression test below exercises the real
+    pipefail/PIPESTATUS interaction against planted duplicate files and
+    czkawka's real exit-code convention, not a mocked/invented exit code
+    (issue #81).
     """
     bin_dir = root / "fakebin"
     bin_dir.mkdir()
@@ -313,7 +316,12 @@ def write_fake_czkawka_tools(root: Path) -> Path:
                 "done",
                 "",
                 'echo "fake czkawka_cli: mode=$mode dir=$dir groups=$count" >&2',
-                'exit "$count"',
+                "# czkawka_cli's real exit-code convention: 0 = nothing found, 11 =",
+                "# a fixed sentinel for \"duplicates found\" (not the group count).",
+                'if [[ "$count" -gt 0 ]]; then',
+                "\texit 11",
+                "fi",
+                "exit 0",
                 "",
             ]
         ),
@@ -332,12 +340,13 @@ def write_fake_czkawka_tools(root: Path) -> Path:
 class CleanupScanExitCodeTests(unittest.TestCase):
     # Regression test for issue #81: 05_cleanup_scan.sh pipes each
     # czkawka_cli invocation through `tee` under `set -euo pipefail`.
-    # czkawka_cli's exit code is a found-count, not a success flag, so the
-    # script used to abort the moment the *first* scan (image) found any
-    # duplicates -- the video scan, exact-duplicate scan, and summary
-    # section never ran. This plants real duplicate files (identical
-    # bytes) and asserts the script runs every scan and reaches its
-    # summary output instead of aborting after the first non-zero exit.
+    # czkawka_cli's exit code is 11 (a fixed "found duplicates" sentinel,
+    # not a success flag or a variable count), so the script used to abort
+    # the moment the *first* scan (image) found any duplicates -- the
+    # video scan, exact-duplicate scan, and summary section never ran.
+    # This plants real duplicate files (identical bytes) and asserts the
+    # script runs every scan and reaches its summary output instead of
+    # aborting after the first non-zero exit.
     def test_completes_all_scans_and_reaches_summary_when_duplicates_found(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -369,15 +378,18 @@ class CleanupScanExitCodeTests(unittest.TestCase):
             self.assertIn(
                 "==> Running Czkawka exact duplicate file scan", result.stdout
             )
-            # The found-count exit codes were treated as informational, not fatal.
+            # The found-duplicates sentinel (exit 11) was treated as
+            # informational, not fatal.
             self.assertIn(
-                "similar image scan: completed, found-count exit 1", result.stdout
+                "similar image scan: completed, duplicates found (exit 11",
+                result.stdout,
             )
             self.assertIn(
-                "similar video scan: completed, found-count exit 1", result.stdout
+                "similar video scan: completed, duplicates found (exit 11",
+                result.stdout,
             )
             self.assertIn(
-                "exact duplicate file scan: completed, found-count exit 1",
+                "exact duplicate file scan: completed, duplicates found (exit 11",
                 result.stdout,
             )
             # Execution reached the summary section at the end of the script.
@@ -389,6 +401,26 @@ class CleanupScanExitCodeTests(unittest.TestCase):
             self.assertTrue((reports / "duplicate_videos.txt").exists())
             self.assertTrue((reports / "duplicate_files.txt").exists())
 
+    @staticmethod
+    def _write_fake_czkawka_that_exits(root: Path, exit_code: int, stderr_line: str) -> Path:
+        """A fakebin with a czkawka_cli stand-in that unconditionally exits
+        with the given code (plus ffmpeg/ffprobe/convert stubs), for
+        exercising 05_cleanup_scan.sh's fatal-vs-informational exit-code
+        handling directly, independent of any found-duplicates logic."""
+        bin_dir = root / "fakebin"
+        bin_dir.mkdir()
+        czkawka = bin_dir / "czkawka_cli"
+        czkawka.write_text(
+            f"#!/usr/bin/env bash\necho '{stderr_line}' >&2\nexit {exit_code}\n",
+            encoding="utf-8",
+        )
+        czkawka.chmod(0o755)
+        for name in ("ffmpeg", "ffprobe", "convert"):
+            stub = bin_dir / name
+            stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            stub.chmod(0o755)
+        return bin_dir
+
     def test_genuine_czkawka_failure_still_aborts_the_script(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -397,20 +429,12 @@ class CleanupScanExitCodeTests(unittest.TestCase):
             staging.mkdir(parents=True)
             (staging / "a.jpg").write_bytes(b"some-bytes")
 
-            bin_dir = root / "fakebin"
-            bin_dir.mkdir()
             # A czkawka_cli stand-in that crashes like an uncaught Rust
-            # panic (exit 101) rather than returning a found-count.
-            czkawka = bin_dir / "czkawka_cli"
-            czkawka.write_text(
-                "#!/usr/bin/env bash\necho 'thread main panicked' >&2\nexit 101\n",
-                encoding="utf-8",
+            # panic (exit 101) rather than returning the found-duplicates
+            # sentinel (11).
+            bin_dir = self._write_fake_czkawka_that_exits(
+                root, 101, "thread main panicked"
             )
-            czkawka.chmod(0o755)
-            for name in ("ffmpeg", "ffprobe", "convert"):
-                stub = bin_dir / name
-                stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-                stub.chmod(0o755)
 
             result = run_script(
                 "05_cleanup_scan.sh",
@@ -427,6 +451,47 @@ class CleanupScanExitCodeTests(unittest.TestCase):
             # It must not have proceeded past the first (image) scan.
             self.assertNotIn("similar video scan", result.stdout)
             self.assertNotIn("==> Summary", result.stdout)
+
+    def test_signal_death_exit_code_still_aborts_the_script(self):
+        # Regression test for the Astrid review finding on PR #83: the
+        # original fatal-code allowlist (101/126/127) didn't cover
+        # signal-death exit codes -- the standard Unix convention where a
+        # process killed by signal N exits with code 128+N. 137 = SIGKILL
+        # (most commonly an OOM-kill) and 139 = SIGSEGV are the practically
+        # important cases, since czkawka_cli is planned to run inside a
+        # memory-limited Docker container (#76/PR #80), where an OOM-kill
+        # is a real, not just theoretical, way for a scan to die mid-run.
+        # Without this, exit 137 would have been silently classified as
+        # "found 137 duplicates" and the truncated report trusted as
+        # complete.
+        for exit_code, label in ((137, "SIGKILL (simulated OOM-kill)"), (139, "SIGSEGV")):
+            with self.subTest(exit_code=exit_code):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    reports = root / "reports"
+                    staging = root / "cleaning_staging"
+                    staging.mkdir(parents=True)
+                    (staging / "a.jpg").write_bytes(b"some-bytes")
+
+                    bin_dir = self._write_fake_czkawka_that_exits(
+                        root, exit_code, f"Killed: {label}"
+                    )
+
+                    result = run_script(
+                        "05_cleanup_scan.sh",
+                        root,
+                        reports,
+                        extra_env={
+                            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                            "RUN_BLUR_SCAN": "0",
+                        },
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("czkawka_cli failed during", result.stderr)
+                    self.assertIn(f"exit {exit_code}", result.stderr)
+                    self.assertNotIn("similar video scan", result.stdout)
+                    self.assertNotIn("==> Summary", result.stdout)
 
 
 def write_fake_ffprobe(root: Path) -> Path:
