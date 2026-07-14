@@ -308,3 +308,49 @@ tests, now stubbing the single `-s` call instead of per-hop TYPE/PKNAME calls. F
 tests across `tests/`) passes; `shellcheck -x -e SC1091 scripts/*.sh config/*.sh`, `shfmt -d`,
 and `ruff check scripts tests` all clean. Verified live against this repo's own dev machine
 (`root_boot_disk` correctly resolves to `vda`, the real boot disk).
+## Phase 9 — Guided run: persist checkpoint state; retry from failed step (2026-07-14)
+
+**Context:** #51, two deferred review notes from PR #50/#58 (guided pipeline run, #48).
+Astrid: `_guidedSegmentIndex` in `media_pipeline_app.dart` lived only in widget state, so an app
+restart mid-guided-run silently forgot which checkpoint had been reached and "Continue Guided
+Run" started over from segment 0. Cody: `_runNextGuidedSegment()` always re-ran a failed
+segment from its first step, even when most of that segment's steps had already succeeded.
+Neither touches the confirm-gate safety invariant — `GuidedRunController.run()` still refuses
+any `PipelineRisk.confirmRequired` step outright, unchanged by this work.
+**Decisions:** Added `lib/src/guided_run_checkpoint_store.dart`, following
+`ImmichChecklistStore`'s exact "small local JSON file, no secrets" pattern: a
+`GuidedRunCheckpointStore` persists a single `GuidedRunCheckpoint` (`segmentIndex`, the
+`hdPath`/`reportDir` settings in effect, and `updatedAt`). Staleness signal: a checkpoint is
+ignored on restore if `hdPath`/`reportDir` no longer match the app's current settings (resuming
+against a since-changed target could silently skip steps a new target never actually ran), or
+if it's older than `guidedRunCheckpointMaxAge` (7 days — a simple, explainable cutoff favored
+over trying to fingerprint script output/mtimes). `_PipelineHomePageState.initState()` now
+restores `_guidedSegmentIndex` from a non-stale checkpoint; `_runNextGuidedSegment()` saves a
+new checkpoint whenever a segment fully completes (and clears it once the whole guided run
+finishes) — no checkpoint write on a step failure/abort, since the segment index hasn't moved.
+For retry granularity, `_runNextGuidedSegment()` now tracks `_guidedSegmentCompletedCount` (how
+many steps at the start of the current segment already succeeded, across possibly more than one
+attempt) and `_guidedSegmentAttemptSettings` (the settings those successes actually ran
+against). A retry resumes from the failed step — skipping the already-succeeded prefix — only
+when the settings for the retry still match `_guidedSegmentAttemptSettings`; if the human edited
+HD_PATH/REPORT_DIR in between, those earlier successes ran against a different target and can no
+longer be trusted, so the segment restarts from its first step instead (the "re-validate
+anything that could have changed" direction from the issue). `GuidedRunController.run()` itself
+is untouched — the app only ever passes it a shorter, still-ordered slice of the same validated
+`buildGuidedRunSteps()` chain, so the "never auto-run a confirm-gated step" check stays exactly
+where it was.
+**Pivots:** Widget tests exercising this initially used a real `GuidedRunCheckpointStore`
+backed by a `Directory.systemTemp.createTemp()` temp directory, following
+`immich_phone_checklist_store_test.dart`'s plain-`test()` pattern — but real `dart:io` file
+operations awaited directly inside `testWidgets` hang indefinitely under flutter_test's
+fake-async zone unless wrapped in `tester.runAsync()` (confirmed with an isolated repro: a bare
+`Directory.systemTemp.createTemp()` inside `testWidgets` never returns). Switched to an
+in-memory fake store (mirroring `widget_test.dart`'s existing `_FakeChecklistStore`), which is
+both simpler and already the established pattern for widget-level tests here.
+**Outcome:** Added `test/guided_run_checkpoint_store_test.dart` (save/load/clear round trip,
+`GuidedRunCheckpoint.isStale` age and settings-mismatch cases) and
+`test/guided_run_persistence_and_retry_widget_test.dart` (checkpoint restored across a simulated
+app restart; a stale checkpoint is ignored; a mid-segment failure retries from the failed step
+without re-running already-succeeded steps; editing HD_PATH before retrying restarts the segment
+from its first step; retry-from-failed-step never reaches `delete-confirm`/`restore-confirm`).
+Full suite: 86 tests pass (`flutter test`); `flutter analyze` clean.

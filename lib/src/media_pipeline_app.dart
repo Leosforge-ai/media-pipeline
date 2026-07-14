@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'duplicate_report.dart';
+import 'guided_run_checkpoint_store.dart';
 import 'immich_connection.dart';
 import 'memory_curator.dart';
 import 'memory_feedback.dart';
@@ -17,6 +18,7 @@ class MediaPipelineApp extends StatelessWidget {
     super.key,
     this.immichClient,
     this.checklistStore,
+    this.guidedRunCheckpointStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
     this.runner,
@@ -24,6 +26,10 @@ class MediaPipelineApp extends StatelessWidget {
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  // Test-only seam: lets widget tests substitute an in-memory-backed store
+  // (a temp-directory-backed GuidedRunCheckpointStore) instead of the real
+  // app's local app-data directory. Left null in the real app.
+  final GuidedRunCheckpointStore? guidedRunCheckpointStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
   // Test-only seam: lets widget tests substitute a fake PipelineRunner
@@ -48,6 +54,7 @@ class MediaPipelineApp extends StatelessWidget {
       home: PipelineHomePage(
         immichClient: immichClient,
         checklistStore: checklistStore,
+        guidedRunCheckpointStore: guidedRunCheckpointStore,
         memoryPreviewState: memoryPreviewState,
         memoryPreviewMessage: memoryPreviewMessage,
         runner: runner,
@@ -61,6 +68,7 @@ class PipelineHomePage extends StatefulWidget {
     super.key,
     this.immichClient,
     this.checklistStore,
+    this.guidedRunCheckpointStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
     this.runner,
@@ -68,6 +76,7 @@ class PipelineHomePage extends StatefulWidget {
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  final GuidedRunCheckpointStore? guidedRunCheckpointStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
   final PipelineRunner? runner;
@@ -91,8 +100,23 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   int _guidedSegmentIndex = 0;
   bool _guidedRunning = false;
   GuidedRunResult? _guidedLastResult;
+  // How many steps at the start of the *current* segment (index
+  // _guidedSegmentIndex) have already succeeded, across possibly more than
+  // one _runNextGuidedSegment() call. Reset to 0 whenever the segment
+  // advances or a retry's settings differ from the failed attempt's. Lets a
+  // retry after a step failure resume from the failed step instead of
+  // re-running the whole segment from the top (issue #51, item 2).
+  int _guidedSegmentCompletedCount = 0;
+  // The PipelineSettings snapshot the current segment's steps have actually
+  // been run against so far. A retry only skips already-succeeded steps
+  // when this still matches the settings in effect for the retry — if the
+  // user edited hdPath/reportDir in between, those earlier successes ran
+  // against a different target and can no longer be trusted, so the
+  // segment restarts from its first step instead.
+  PipelineSettings? _guidedSegmentAttemptSettings;
   late final ImmichApiClient _immichClient;
   late final ImmichChecklistStore _checklistStore;
+  late final GuidedRunCheckpointStore _guidedRunCheckpointStore;
   late final TextEditingController _hdPathController;
   late final TextEditingController _immichApiKeyController;
   late final TextEditingController _immichUrlController;
@@ -130,6 +154,8 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     _guidedSegments = buildGuidedRunSegments();
     _immichClient = widget.immichClient ?? ImmichApiClient();
     _checklistStore = widget.checklistStore ?? ImmichChecklistStore();
+    _guidedRunCheckpointStore =
+        widget.guidedRunCheckpointStore ?? GuidedRunCheckpointStore();
     _hdPathController = TextEditingController(text: _settings.hdPath);
     _immichUrlController = TextEditingController(text: 'http://localhost:2283');
     _immichApiKeyController = TextEditingController();
@@ -141,6 +167,41 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       _states[step.id] = const StepRunState();
     }
     unawaited(_loadPhoneChecklists());
+    unawaited(_loadGuidedRunCheckpoint());
+  }
+
+  /// Restores `_guidedSegmentIndex` from a previously persisted checkpoint
+  /// (issue #51, item 1), so an app restart mid-guided-run shows "Continue
+  /// Guided Run" at the right point instead of silently resetting to
+  /// segment 0. A missing, corrupt, or stale (see
+  /// `GuidedRunCheckpoint.isStale`) checkpoint just leaves the guided run
+  /// starting fresh, same as before this existed.
+  Future<void> _loadGuidedRunCheckpoint() async {
+    try {
+      final checkpoint = await _guidedRunCheckpointStore.load();
+      if (!mounted || checkpoint == null) {
+        return;
+      }
+      if (checkpoint.isStale(
+        currentHdPath: _settings.hdPath,
+        currentReportDir: _settings.reportDir,
+      )) {
+        unawaited(_guidedRunCheckpointStore.clear());
+        return;
+      }
+      final restoredIndex = checkpoint.segmentIndex
+          .clamp(0, _guidedSegments.length)
+          .toInt();
+      if (restoredIndex <= 0) {
+        return;
+      }
+      setState(() {
+        _guidedSegmentIndex = restoredIndex;
+      });
+    } catch (_) {
+      // Non-fatal: a corrupt/unreadable checkpoint file just means the
+      // guided run starts from segment 0, same as if none existed.
+    }
   }
 
   @override
@@ -321,7 +382,9 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     if (lastResult.outcome == GuidedRunOutcome.stepFailed) {
       return 'Guided run stopped: "${lastResult.failedStepId}" failed '
           '(exit ${lastResult.failedExitCode}). Review its log, fix the '
-          'issue, then run this segment again.';
+          'issue, then continue — it resumes from this step, not the start '
+          'of the segment (unless you changed the HD path or report '
+          'directory, which restarts the segment from its first step).';
     }
 
     if (lastResult.outcome == GuidedRunOutcome.aborted) {
@@ -350,14 +413,36 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       return;
     }
 
-    final segmentStepIds = _guidedSegments[_guidedSegmentIndex];
+    final fullSegmentStepIds = _guidedSegments[_guidedSegmentIndex];
+    final attemptSettings = _settings.copyWith(
+      hdPath: _hdPathController.text.trim(),
+      reportDir: _reportDirController.text.trim(),
+    );
+
+    // Resume from the step that failed last time instead of re-running the
+    // whole segment from the top (issue #51, item 2) — but only when the
+    // settings driving this attempt are unchanged from the failed one.
+    // Earlier steps in this segment already succeeded against
+    // _guidedSegmentAttemptSettings; if the human edited the HD path or
+    // report directory before retrying, those successes no longer describe
+    // the target this attempt will actually run against, so re-validate by
+    // restarting the segment from its first step instead of trusting them.
+    final previousAttemptSettings = _guidedSegmentAttemptSettings;
+    final settingsUnchanged =
+        previousAttemptSettings != null &&
+        previousAttemptSettings.hdPath == attemptSettings.hdPath &&
+        previousAttemptSettings.reportDir == attemptSettings.reportDir;
+    final resumeFromIndex = settingsUnchanged
+        ? _guidedSegmentCompletedCount
+              .clamp(0, fullSegmentStepIds.length)
+              .toInt()
+        : 0;
+    final segmentStepIds = fullSegmentStepIds.sublist(resumeFromIndex);
     final segmentSteps = segmentStepIds.map(_guidedStepById).toList();
 
     setState(() {
-      _settings = _settings.copyWith(
-        hdPath: _hdPathController.text.trim(),
-        reportDir: _reportDirController.text.trim(),
-      );
+      _settings = attemptSettings;
+      _guidedSegmentAttemptSettings = attemptSettings;
       _guidedRunning = true;
     });
 
@@ -414,10 +499,36 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     setState(() {
       _guidedRunning = false;
       _guidedLastResult = result;
+      _guidedSegmentCompletedCount =
+          resumeFromIndex + result.completedStepIds.length;
       if (result.outcome == GuidedRunOutcome.completed) {
         _guidedSegmentIndex += 1;
+        _guidedSegmentCompletedCount = 0;
+        _guidedSegmentAttemptSettings = null;
       }
     });
+
+    // Persist checkpoint progress (issue #51, item 1) only on a fully
+    // completed segment: a step failure or abort doesn't move
+    // _guidedSegmentIndex, so there's nothing new to persist there — the
+    // in-memory retry-from-failed-step state above already covers resuming
+    // within the current app session.
+    if (result.outcome == GuidedRunOutcome.completed) {
+      if (_guidedRunFinished) {
+        unawaited(_guidedRunCheckpointStore.clear());
+      } else {
+        unawaited(
+          _guidedRunCheckpointStore.save(
+            GuidedRunCheckpoint(
+              segmentIndex: _guidedSegmentIndex,
+              hdPath: _settings.hdPath,
+              reportDir: _settings.reportDir,
+              updatedAt: DateTime.now(),
+            ),
+          ),
+        );
+      }
+    }
   }
 
   /// Opens the thumbnail-diff duplicate review dialog (#49) for the current
