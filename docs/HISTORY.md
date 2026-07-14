@@ -791,3 +791,57 @@ defaulted into.
 review as **required** (not just warranted) given this is the highest-stakes port in the
 series. Part of #76 and #77; not closing either — 12/13 and Phase 0c/0d remain, and Phase 2
 wiring (replacing the Bash subprocess calls in `pipeline_models.dart`) is still future work.
+
+## Phase 0b (continued) — Dart port of `12_clean_immich_takeout_duplicates.sh` (2026-07-14)
+
+**Context:** Third of the four confirm-gated destructive scripts in issue #76/#77's Phase 0b
+(after `11_restore_from_trash.sh`, PR #82, and `06_delete_duplicates.sh`, PR #86). This script
+finds Google Takeout localized year-folder duplicates (`Fotos de YYYY/*`) that match a
+canonical `YYYY/*` file by basename, size, AND SHA-256 hash, and moves verified duplicates to
+`media_trash`.
+**Decisions:**
+- Added `lib/src/clean_takeout_duplicates.dart`: `matchLocalizedYearFolderName` (pure
+  `Fotos de YYYY` directory-name match), `verifyTakeoutDuplicateCandidate` (the three-way
+  basename+size+hash verification, with every filesystem access injectable via `FileSizer`/
+  `FileHasher`/`PathExistsChecker` so the decision branching is directly unit-testable without
+  real files), and `TakeoutDuplicateCleaner.run` (the async orchestration walking `Fotos de
+  YYYY`/`YYYY` directory pairs and delegating the actual move to the shared `SafeFileMover`).
+  Same "port the logic, defer the wiring" pattern as the two prior ports: `pipeline_models.dart`
+  / `media_pipeline_app.dart` are untouched, and the actual executed pipeline step still shells
+  out to the real `scripts/12_clean_immich_takeout_duplicates.sh`.
+- **Hashing without a new dependency:** `defaultFileHasher` shells out to the real `sha256sum`
+  binary (matching `pipeline_models.dart`'s existing `requiredTools: ['sha256sum']` declaration
+  for this step) rather than adding a `crypto` package dependency to `pubspec.yaml`.
+- **Typed confirmation phrase:** unlike `06`/`11`, this script also gates confirm mode on typing
+  the exact phrase `"MOVE TAKEOUT DUPLICATES"` at an interactive prompt. Since this port isn't
+  wired into the app yet, the real Bash script still owns that interactive prompt; this port
+  adds `kTakeoutDuplicatesConfirmPhrase`/`isTakeoutDuplicatesConfirmationPhraseValid` so the
+  phrase itself is already ported, named, and unit-tested ahead of Phase 2 wiring, while
+  `TakeoutDuplicateCleaner.run` still takes a plain `confirm` bool, matching
+  `TrashRestorer.run`/`DuplicateDeleter.run`'s precedent exactly.
+- **Trash-move collision-handling deviation (intentional, documented, same as PR #86):** the
+  Bash script's own `unique_destination` resolves a destination collision with a numbered
+  suffix (`_1`, `_2`, ...) and always moves. This port instead uses
+  `SafeFileMover.moveNoClobber`, which skips the move and leaves the source in place on
+  collision (`mv -n` semantics). Deliberate, safety-neutral-or-safer, and does not affect the
+  verify/skip decision logic the parity test verifies.
+**Verification:** `test/clean_takeout_duplicates_test.dart` (27 tests): `matchLocalizedYearFolderName`
+exact-match/case-sensitivity tests; confirmation-phrase validity tests; `verifyTakeoutDuplicateCandidate`
+tests proving the three-way check short-circuits on size mismatch before ever hashing, and is never
+satisfied by a size-only match; `TakeoutDuplicateCleaner` dry-run/confirm/no-clobber/missing-canonical-file/
+missing-canonical-year-folder/spaces-and-unicode behavior. Highest-value test: a **Bash-vs-Dart parity
+test** that runs the real `scripts/12_clean_immich_takeout_duplicates.sh` (via `Process.run`) against a
+synthetic fixture with four candidates — a genuine verified duplicate, a **size-mismatch** case, a
+**hash-mismatch-despite-matching-size** case (the adversarial case proving the three-way check isn't
+weakened to size-only), and a missing-canonical-file case — and asserts identical
+verified/size-mismatch/hash-mismatch/missing-canonical decisions and identical `Candidates
+inspected`/`Verified duplicates` counters between the two implementations. `flutter analyze`: no
+issues. `flutter test`: 208/208 passing (27 new). `scripts/12_clean_immich_takeout_duplicates.sh` itself
+is untouched — additive only, remains the working fallback.
+**Pivots:** None from the original plan; the hashing-dependency and confirm-phrase design questions
+were both anticipated and resolved deliberately rather than defaulted into.
+**Outcome:** `lib/src/clean_takeout_duplicates.dart` is a parity-tested, standalone Dart port of
+`12_clean_immich_takeout_duplicates.sh`'s decision logic, ready for Phase 2 wiring. PR flags Cody +
+Astrid review as required, matching the rigor of the prior two ports in this series. Part of #76 and
+#77; not closing either — `13_dedupe_live_photos.sh` and Phase 0c/0d remain, and Phase 2 wiring is
+still future work.
