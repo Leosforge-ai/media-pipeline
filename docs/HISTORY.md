@@ -354,3 +354,65 @@ app restart; a stale checkpoint is ignored; a mid-segment failure retries from t
 without re-running already-succeeded steps; editing HD_PATH before retrying restarts the segment
 from its first step; retry-from-failed-step never reaches `delete-confirm`/`restore-confirm`).
 Full suite: 86 tests pass (`flutter test`); `flutter analyze` clean.
+
+## Phase 10 — Dedup review: surface sample coverage prominently (2026-07-14)
+
+**Context:** #53, follow-up from Astrid's #52 review. Phase 4's thumbnail review dialog is
+honest about sampling ("Showing N of M pairs", never silently truncated), but the
+`delete-confirm` gate only ever required *opening* the dialog once — not reviewing a
+representative share of pairs. For a large duplicate set (e.g. 20 of 143 shown ≈ 14%), a human
+could reasonably feel "I reviewed the duplicates" while `--confirm` would act on all 143, not
+just the reviewed sample.
+**Decisions:** Combined both directions the issue floated, since together they're still simple
+to reason about: (1) the "delete-confirm" step's detail panel — directly above the "Run
+Confirm" button itself, not just inside a dialog a human could skim past — now states reviewed
+count and percentage explicitly ("You reviewed 20 of 25 pairs (80%) before confirming.") in a
+color-coded chip (red under 50%, orange 50-99%, primary at 100%); and (2) the review dialog
+gained a "Review Another Sample" button that draws additional, non-overlapping batches from the
+pairs not yet shown, so a human who wants more confidence than the first batch gives can keep
+paging through the set. `duplicate_report.dart` gained
+`sampleAdditionalDuplicateReviewPairs(pairs, alreadyReviewedIndices, {batchNumber})` (batch
+`0` is `sampleDuplicateReviewPairs`'s new implementation), `DuplicateReviewSample.shownIndices`
+(original-report indices, not path-based, so pairs that legitimately share a path can't be
+miscounted) and `.coveragePercent` (always floored, never rounded up — this is a trust signal
+next to a destructive action), and `duplicateReviewCoveragePercent(reviewed, total)`. The app
+tracks `_dedupReviewedIndices` (a `Set<int>`, union across every batch opened for the current
+dry-run output), reset alongside `_dedupReviewAcknowledged` whenever `delete-dry-run` reruns,
+same invalidation rule as Phase 4.
+Deliberately **not** touched: the confirm gate itself. `canRunStep()` and
+`requiresDuplicateThumbnailReview`/`duplicateThumbnailReviewAcknowledged` are byte-for-byte
+unchanged — opening the review dialog once still unlocks `delete-confirm`, exactly as in Phase
+4. This is framing/information only, strictly additive on top of the existing gate: a
+`_DedupReviewPanel` coverage banner can show "80%" and confirm is still enabled, by design (the
+issue's own possible-directions list did not ask for a stricter gate, and CLAUDE.md's Safety
+Rules call for not making the gate *harder* to reach — not for changing when it unlocks). Sofie
+weighed a threshold-based stricter gate (e.g. "must review 50%+ before confirm") against this
+and chose the informational approach: a hard threshold risks becoming exactly the kind of
+brittle, hard-to-explain rule the review dialog was built to avoid (Phase 4's "explainable, no
+silent truncation" ethos) — a human who's seen 3 confirmed near-duplicate JPEGs from the same
+camera in a row may reasonably trust the rest without wanting to click through 143; making that
+call impossible would trade one false-confidence risk for a worse one (training people to click
+past a gate they feel is arbitrary). The coverage banner instead makes the tradeoff visible and
+lets the human decide.
+**Pivots:** The review dialog's `initState()` originally called the
+`onReviewedIndicesChanged` callback synchronously to report the initial batch's coverage back
+to the parent `_PipelineHomePageState`. This calls `setState()` on an ancestor widget while the
+framework is still building the dialog's route — caught in an early widget-test run as a
+`setState() called during build` failure. Deferred with
+`WidgetsBinding.instance.addPostFrameCallback` instead, which is safe because by then the
+current build pass has finished; the "Review Another Sample" button's own `setState` call is
+triggered by a user tap outside any build phase, so it needed no such deferral. Also initially
+compared a per-batch "is this batch incomplete" flag against the grand total (`totalPairs`)
+rather than what was actually still unreviewed at draw time, which made a final "everything
+that's left" batch incorrectly still report as sampled — fixed by adding
+`DuplicateReviewSample`'s private `_remainingBeforeBatch` bookkeeping so `isSampled` compares
+against the right denominator.
+**Outcome:** `06_delete_duplicates.sh` and its Czkawka-report parsing are unchanged — Dart/UI
+only, per the issue's own scope. `duplicate_report_test.dart` gained coverage for
+`duplicateReviewCoveragePercent`'s flooring behavior, `shownIndices` correctness, and
+`sampleAdditionalDuplicateReviewPairs`'s non-overlapping-batch/reproducibility/tail-handling
+cases. `dedup_review_widget_test.dart` gained an end-to-end case proving the coverage banner
+and "Review Another Sample" flow reach 100% cumulative coverage without ever re-showing a pair,
+and a case proving the original Phase 4 gate behavior is unchanged (opening the dialog once
+still unlocks confirm at any coverage percentage). Both of Phase 4's original gate tests pass
+unmodified. Full suite: 98 tests pass (`flutter test`); `flutter analyze` clean.
