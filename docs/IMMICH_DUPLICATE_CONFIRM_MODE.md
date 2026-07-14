@@ -28,17 +28,21 @@ Confirm mode requires the exact typed phrase on stdin:
 printf 'MOVE TAKEOUT DUPLICATES\n' | bash scripts/12_clean_immich_takeout_duplicates.sh --confirm
 ```
 
-After confirm mode, inspect the trash batch and restore files manually if
-needed:
+After confirm mode, inspect the trash and restore files manually if needed.
+Moved files mirror their full original absolute path under `$MEDIA_TRASH`
+(the same layout `06_delete_duplicates.sh` and `13_dedupe_live_photos.sh`
+use — no timestamped batch subdirectory), which is what lets
+`11_restore_from_trash.sh` reconstruct the original path automatically:
 
 ```bash
-ls -la "$MEDIA_TRASH"
-ls -la "$MEDIA_TRASH/immich_library_fotos_de_duplicates_TIMESTAMP"
-mv "$MEDIA_TRASH/immich_library_fotos_de_duplicates_TIMESTAMP/Takeout/Google Fotos/Fotos de 2024/IMG_1951.HEIC" \
+ls -la "$MEDIA_TRASH/mnt/target_drive/immich_library/Takeout/Google Fotos/Fotos de 2024"
+mv "$MEDIA_TRASH/mnt/target_drive/immich_library/Takeout/Google Fotos/Fotos de 2024/IMG_1951.HEIC" \
    "/mnt/target_drive/immich_library/Takeout/Google Fotos/Fotos de 2024/IMG_1951.HEIC"
 ```
 
-Adjust the timestamped batch path and restore destination to match your setup.
+Adjust the path to match your setup, or just run
+`./scripts/11_restore_from_trash.sh --confirm` to restore everything in
+`media_trash` back to its original location in one pass.
 
 ## Proposed App Design
 

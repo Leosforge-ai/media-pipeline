@@ -89,10 +89,16 @@ confirm actions, and no permanent deletion.
 
 Current app status:
 
-- wraps the existing guarded script workflow;
+- wraps the existing guarded script workflow, with both a manual per-step
+  mode and a consolidated **Guided Run** mode that chains the safe steps
+  automatically and still stops at the same two human checkpoints (before
+  the duplicate-trash confirm, before the Immich rescan implied by syncing);
+- shows a side-by-side **duplicate thumbnail review** before the
+  duplicate-trash confirm step becomes reachable, sampling large sets with
+  an honest "N of M" count instead of asking you to trust raw report text;
 - shows Immich help and private-server setup guidance;
 - checks Immich with read-only API requests and a statistics panel;
-- tracks phone backup setup in a local non-secret checklist.
+- tracks phone backup setup in a local non-secret checklist;
 - includes a dry-run step for Google Takeout localized duplicate cleanup in the Immich library.
 
 Useful docs:
