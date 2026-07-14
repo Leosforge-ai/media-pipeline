@@ -84,7 +84,9 @@ It keeps the matching canonical file under:
 
 A file is moved only when the canonical file exists with the same basename,
 same size, and same SHA-256 hash. Confirm mode still never deletes files; it
-moves verified duplicates into a timestamped folder under `media_trash`.
+mirrors each duplicate's full original absolute path under `media_trash`
+(the same layout `06_delete_duplicates.sh` and `13_dedupe_live_photos.sh`
+use), so `11_restore_from_trash.sh` can reverse the move.
 
 Before confirm mode:
 
