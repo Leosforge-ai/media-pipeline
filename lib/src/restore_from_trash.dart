@@ -148,11 +148,25 @@ class RestoreOutcome {
       'RestoreOutcome($action, $trashPath -> $destinationPath)';
 }
 
+/// Copies [src] to [dst]. The default implementation just calls
+/// `File(src).copy(dst)`; [TrashRestorer]'s constructor accepts an
+/// alternative so tests can simulate a corrupt/partial copy (e.g. one that
+/// writes truncated bytes) without needing a genuine cross-device rename
+/// failure to trigger the fallback path that uses it.
+typedef FileCopier = Future<void> Function(String src, String dst);
+
+Future<void> _defaultFileCopier(String src, String dst) =>
+    File(src).copy(dst).then((_) {});
+
 /// Walks `trashRoot` recursively and, for each file found, restores it to
 /// its reconstructed original absolute path — or, in dry-run mode (the
 /// default, matching the Bash script), only reports what would happen.
 class TrashRestorer {
-  const TrashRestorer();
+  const TrashRestorer({this.copier = _defaultFileCopier});
+
+  /// Only ever overridden by tests (see [FileCopier]'s doc comment); real
+  /// callers always get the default `File.copy` implementation.
+  final FileCopier copier;
 
   /// Lists every regular file currently under [trashRoot], recursively, in
   /// sorted order (for deterministic output — the Bash script's `find` has
@@ -257,9 +271,37 @@ class TrashRestorer {
       await srcFile.rename(dst);
     } on FileSystemException catch (e) {
       if (!_isCrossDeviceError(e)) rethrow;
+      await copyVerifyAndReplace(src, dst);
+    }
+  }
 
-      final srcLength = await srcFile.length();
-      await srcFile.copy(dst);
+  /// The cross-device fallback body: copy [src] to [dst], verify the copy
+  /// landed correctly, then delete the original — never deleting [src]
+  /// before [dst] is confirmed on disk. On *any* failure of the copy or
+  /// its verification, the known-bad partial/corrupt [dst] is deleted
+  /// before the failure propagates: [src] is still safely intact in the
+  /// trash at that point (it's only ever deleted after verification
+  /// succeeds), so removing a bad [dst] here is safe cleanup, not a risky
+  /// one.
+  ///
+  /// Without this cleanup, [TrashRestorer.run]'s existence-only no-clobber
+  /// check (`File(destinationPath).exists()`) would see the corrupt
+  /// leftover on any future restore attempt and silently report
+  /// [RestoreAction.skippedExisting] forever — permanently masking the
+  /// still-good file sitting safely in trash, even though nothing was
+  /// technically ever *deleted* (Cody review finding on PR #82).
+  ///
+  /// Only public so tests can exercise this exact failure-cleanup path
+  /// directly (via [FileCopier] injection simulating a truncated/corrupt
+  /// copy) without needing a genuine cross-device (`EXDEV`) rename failure
+  /// to trigger it — that requires two distinct mounted filesystems, which
+  /// isn't available in this sandbox or in CI. Production code only ever
+  /// reaches this via [_moveFile]'s cross-device catch branch above.
+  Future<void> copyVerifyAndReplace(String src, String dst) async {
+    final srcFile = File(src);
+    final srcLength = await srcFile.length();
+    try {
+      await copier(src, dst);
       final dstLength = await File(dst).length();
       if (dstLength != srcLength) {
         throw FileSystemException(
@@ -268,8 +310,14 @@ class TrashRestorer {
           dst,
         );
       }
-      await srcFile.delete();
+    } catch (_) {
+      final partial = File(dst);
+      if (await partial.exists()) {
+        await partial.delete();
+      }
+      rethrow;
     }
+    await srcFile.delete();
   }
 
   /// True if [e] represents a cross-device/cross-filesystem rename failure

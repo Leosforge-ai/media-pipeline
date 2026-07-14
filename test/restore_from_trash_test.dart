@@ -397,23 +397,150 @@ void main() {
     },
   );
 
-  group('cross-device rename fallback (documented, not exercised in CI)', () {
+  group('cross-device rename fallback: copyVerifyAndReplace', () {
     // TrashRestorer._moveFile tries File.rename first (matching `mv -n`'s
     // fast path) and, only on a cross-device/cross-filesystem failure
     // (EXDEV, errno 18 — detected via FileSystemException.osError.errorCode
-    // or a "cross-device" message fallback), falls back to copy + verify +
-    // delete, mirroring what real `mv` does transparently across
-    // filesystems. Unlike the rest of this suite, this specific fallback
-    // branch cannot be exercised with a single-filesystem temp directory:
-    // reproducing a genuine EXDEV requires two distinct mounted
-    // filesystems/devices, which isn't available in this sandbox or in CI.
-    // This is a known, explicitly-documented test gap (see the design notes
-    // in restore_from_trash.dart on TrashRestorer._moveFile) rather than a
-    // silently-skipped concern — flagging for reviewer awareness (Cody/
-    // Astrid) rather than claiming coverage that doesn't exist.
+    // or a "cross-device" message fallback), falls back to
+    // copyVerifyAndReplace(): copy + verify + delete, mirroring what real
+    // `mv` does transparently across filesystems.
+    //
+    // Reproducing a genuine EXDEV to reach this fallback via _moveFile
+    // itself would require two distinct mounted filesystems/devices, which
+    // isn't available in this sandbox or in CI — that specific trigger
+    // remains a documented gap (see the last test in this group). But the
+    // fallback body itself (copyVerifyAndReplace) is exposed directly and
+    // takes an injectable [FileCopier], so its actual copy/verify/cleanup
+    // logic — including the failure-cleanup path Cody flagged on PR #82,
+    // where a corrupt/partial destination must never be left stranded to
+    // silently mask a still-good file sitting safely in trash — is fully
+    // exercised here without needing EXDEV at all.
+    late Directory tempDir;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp(
+        'restore_from_trash_test_',
+      );
+    });
+
+    tearDown(() async {
+      if (await tempDir.exists()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
     test(
-      'documented gap: EXDEV fallback path requires two real filesystems, '
-      'not exercisable via a single temp directory',
+      'happy path: copies, verifies, then deletes the original',
+      () async {
+        final src = File('${tempDir.path}/src.jpg');
+        final dst = File('${tempDir.path}/dst.jpg');
+        await src.writeAsString('original-bytes');
+
+        const restorer = TrashRestorer();
+        await restorer.copyVerifyAndReplace(src.path, dst.path);
+
+        expect(await src.exists(), isFalse);
+        expect(await dst.exists(), isTrue);
+        expect(await dst.readAsString(), 'original-bytes');
+      },
+    );
+
+    test(
+      'verification-failure cleanup: a corrupt/truncated copy is deleted '
+      'before the failure propagates, never left stranded to mask the '
+      'still-good original (Cody review finding on PR #82)',
+      () async {
+        final src = File('${tempDir.path}/src.jpg');
+        final dst = File('${tempDir.path}/dst.jpg');
+        await src.writeAsString('original-bytes-longer-than-truncated');
+
+        // Simulate a copy that lands a truncated/corrupt destination file
+        // rather than throwing outright — the case a real interrupted
+        // cross-device copy could produce.
+        final restorer = TrashRestorer(
+          copier: (srcPath, dstPath) async {
+            await File(dstPath).writeAsString('truncated');
+          },
+        );
+
+        await expectLater(
+          restorer.copyVerifyAndReplace(src.path, dst.path),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        // The corrupt partial destination must be gone, not stranded...
+        expect(await dst.exists(), isFalse);
+        // ...and the original must still be safely intact in the trash,
+        // since it's only ever deleted after verification succeeds.
+        expect(await src.exists(), isTrue);
+        expect(
+          await src.readAsString(),
+          'original-bytes-longer-than-truncated',
+        );
+      },
+    );
+
+    test(
+      'copier-throws cleanup: if the copier itself throws after partially '
+      'writing dst, the partial file is still cleaned up',
+      () async {
+        final src = File('${tempDir.path}/src.jpg');
+        final dst = File('${tempDir.path}/dst.jpg');
+        await src.writeAsString('original-bytes');
+
+        final restorer = TrashRestorer(
+          copier: (srcPath, dstPath) async {
+            // Simulate a copy that writes a partial file, then fails
+            // outright (e.g. a real disk-full or I/O error mid-copy).
+            await File(dstPath).writeAsString('partial');
+            throw const FileSystemException('simulated mid-copy I/O error');
+          },
+        );
+
+        await expectLater(
+          restorer.copyVerifyAndReplace(src.path, dst.path),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        expect(await dst.exists(), isFalse);
+        expect(await src.exists(), isTrue);
+        expect(await src.readAsString(), 'original-bytes');
+      },
+    );
+
+    test(
+      'no partial destination to clean up: verification failure when the '
+      'copier never created dst at all does not throw a secondary error',
+      () async {
+        final src = File('${tempDir.path}/src.jpg');
+        final dst = File('${tempDir.path}/dst.jpg');
+        await src.writeAsString('original-bytes');
+
+        final restorer = TrashRestorer(
+          copier: (srcPath, dstPath) async {
+            // Copier reports success without actually writing anything —
+            // an extreme edge case, but must not crash the cleanup step
+            // (which only deletes dst if it actually exists).
+          },
+        );
+
+        await expectLater(
+          restorer.copyVerifyAndReplace(src.path, dst.path),
+          throwsA(isA<FileSystemException>()),
+        );
+
+        expect(await dst.exists(), isFalse);
+        expect(await src.exists(), isTrue);
+      },
+    );
+
+    test(
+      'documented gap: reaching this fallback via a genuine EXDEV rename '
+      'failure (rather than calling copyVerifyAndReplace directly, as the '
+      'tests above do) requires two real mounted filesystems, not '
+      'exercisable via a single temp directory — flagging for reviewer '
+      'awareness (Cody/Astrid) rather than claiming coverage that '
+      "doesn't exist",
       () {
         expect(true, isTrue);
       },
