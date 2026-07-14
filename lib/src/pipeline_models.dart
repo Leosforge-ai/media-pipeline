@@ -86,10 +86,26 @@ class PipelineStep {
 }
 
 class PipelineRunResult {
-  const PipelineRunResult({required this.exitCode, required this.output});
+  const PipelineRunResult({
+    required this.exitCode,
+    required this.output,
+    required this.stdoutOutput,
+  });
 
+  /// Process exit code.
   final int exitCode;
+
+  /// Combined stdout+stderr, delivered in the interleaved order the two
+  /// streams actually arrived — this is what the live "step log" UI
+  /// displays. Its ordering/interleaving behavior is unchanged from before
+  /// issue #54.
   final String output;
+
+  /// Stdout only, captured from a dedicated accumulation that never mixes
+  /// in stderr. Safety-relevant parsers that read back a script's own
+  /// stdout announcements (e.g. `duplicate_report.dart`'s "Keep:" / "Would
+  /// trash:" parser) must read this field, not [output] — see issue #54.
+  final String stdoutOutput;
 
   bool get succeeded => exitCode == 0;
 }
@@ -99,21 +115,32 @@ class StepRunState {
     this.status = PipelineStepStatus.idle,
     this.exitCode,
     this.log = '',
+    this.stdoutLog = '',
   });
 
   final PipelineStepStatus status;
   final int? exitCode;
+
+  /// Combined stdout+stderr for the live step-log display. Never use this
+  /// for safety-relevant parsing — see [stdoutLog].
   final String log;
+
+  /// Stdout-only capture of the step's process output (see
+  /// [PipelineRunResult.stdoutOutput]). Safety-relevant parsers (e.g.
+  /// `parseDuplicateDryRunOutput`) must read this field, not [log].
+  final String stdoutLog;
 
   StepRunState copyWith({
     PipelineStepStatus? status,
     int? exitCode,
     String? log,
+    String? stdoutLog,
   }) {
     return StepRunState(
       status: status ?? this.status,
       exitCode: exitCode ?? this.exitCode,
       log: log ?? this.log,
+      stdoutLog: stdoutLog ?? this.stdoutLog,
     );
   }
 }
