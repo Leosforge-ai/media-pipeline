@@ -495,3 +495,41 @@ plus inline comments giving the exact commands (proxy.golang.org `.mod`/`/list` 
 JSON lookups) to check compatibility and bump `GITLEAKS_VERSION` and the exact `go-version`
 patch together the next time a deliberate upgrade is needed, so this doesn't silently drift
 back to a floating target. No product code (`scripts/`, `lib/`, `tests/`) touched — CI config only.
+
+## Phase 13 — Dart port, Phase 0a: drive-detection read-only logic (2026-07-14)
+
+**Context:** Part of #76/#77's shared Phase 0 roadmap (cross-platform Docker-container /
+native-runtime designs both need the pipeline's orchestration logic ported from Bash to Dart
+before either design can proceed). Phase 0a is the first slice: port only the READ-ONLY
+detection logic from `scripts/00b_first_time_drive_setup.sh` — boot/root-disk resolution,
+candidate-partition filtering, filesystem-type detection — leaving the confirmation-gated
+mount/fstab-append actions in Bash for a later phase, per the same print-don't-execute boundary
+the Bash script already enforces.
+**Decisions:** New `lib/src/drive_detection.dart` mirrors the Bash functions 1:1
+(`lsblk_ancestor_chain_raw`/`disk_name_from_partition`/`root_boot_disk` →
+`DriveDetector.lsblkAncestorChain`/`diskNameFromPartition`/`rootBootDisk`;
+`list_candidate_partitions` → `filterCandidatePartitions`; `detect_fstype` →
+`DriveDetector.detectFstype`), built from small pure functions
+(`parseLsblkPairLines`, `stripBtrfsSubvolumeSuffix`, `resolveDiskNameFromAncestorChain`,
+`filterCandidatePartitions`, `extractFirstLine`) that take plain strings/data with zero
+subprocess dependency, plus a thin `DriveDetector` class that shells out via `Process.run`
+(same pattern as `pipeline_runner.dart`). Kept the `-s`/`--inverse` ancestor-chain primitive
+from PR #66 as the *only* call site that resolves a device's disk ancestry — there is no
+hand-rolled PKNAME-walking loop in this port for the #56/#57/#58 bug class to recur in.
+Did not modify or retire `scripts/00b_first_time_drive_setup.sh` — it keeps working standalone
+until a much later phase proves the Dart port fully equivalent.
+**Outcome:** `test/drive_detection_test.dart` (25 tests) covers every scenario
+`tests/test_first_time_drive_setup.py`'s Bash suite tests for this logic: simple partition,
+LVM chain (`/dev/mapper/vg-root` → `sda1` → `sda`), btrfs subvolume bracket-suffix stripping,
+boot-disk exclusion (including the LVM sibling-partition regression and the "boot disk is the
+only large unmounted partition" regression), non-numeric/missing `SIZE` handling, and the
+lsblk-first/sudo-blkid-fallback filesystem-type detection order — all against synthetic
+fixture strings, no real subprocess needed. Also kept a `DriveDetector real-machine tests`
+group that calls the real `lsblk`/`blkid`/`findmnt` on whatever Linux machine runs the suite
+(skipped outside Linux), matching what the Bash test suite already does for its own real
+end-to-end tests: `rootBootDisk` resolves to a disk lsblk actually reports, the ancestor-chain
+query for that disk reports zero `TYPE=part` rows, `candidatePartitions` never includes a
+partition on the real boot disk, and `detectFstype` returns a real filesystem type for the
+root partition without needing the sudo fallback. Full suite: `flutter analyze` clean, `flutter
+test` 126/126 passing (up from 101), including the new real-machine tests running live during
+CI/local verification on this Linux dev box.
