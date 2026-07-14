@@ -155,6 +155,141 @@ void main() {
       expect(find.text('Duplicate thumbnail review required'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'a large duplicate set (#53): sample coverage is surfaced right next '
+    'to the confirm button, and "Review Another Sample" grows cumulative '
+    'coverage without ever re-showing an already-reviewed pair',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      // 25 pairs: over the default 20-pair sample size, so the initial
+      // dialog open only covers a sample, not the full set.
+      final buffer = StringBuffer();
+      for (var i = 0; i < 25; i++) {
+        buffer
+          ..writeln('Keep: /tmp/media-pipeline-test/keep$i.jpg')
+          ..writeln('Would trash: /tmp/media-pipeline-test/trash$i.jpg')
+          ..writeln();
+      }
+
+      final fakeRunner = _FakePipelineRunner(
+        outputs: {'delete-dry-run': buffer.toString()},
+      );
+
+      await tester.pumpWidget(MediaPipelineApp(runner: fakeRunner));
+
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run Step'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Move Duplicates To Trash'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review Duplicate Thumbnails'));
+      await tester.pumpAndSettle();
+
+      // Initial batch: 20 of 25 pairs shown, honestly labeled, with a
+      // "Review Another Sample" option since 5 pairs remain unreviewed.
+      expect(
+        find.text('Showing 20 of 25 pairs (batch 1) — full list in the dry-run report.'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Cumulative: reviewed 20 of 25 pairs'),
+        findsOneWidget,
+      );
+      final reviewAnotherButton = find.widgetWithText(
+        OutlinedButton,
+        'Review Another Sample (5 pairs not yet reviewed)',
+      );
+      expect(reviewAnotherButton, findsOneWidget);
+
+      // Request the next batch: it covers the remaining 5 pairs, so
+      // cumulative coverage reaches 100% and the button disappears.
+      await tester.tap(reviewAnotherButton);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Showing all 5 pairs.'), findsOneWidget);
+      expect(
+        find.textContaining('Cumulative: reviewed 25 of 25 pairs (100%)'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Review Another Sample'), findsNothing);
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+
+      // Back on the step detail panel: the coverage banner right next to
+      // "Run Confirm" states the full reviewed-vs-total percentage, not
+      // just the count from the last dialog open.
+      expect(
+        find.text(
+          'You reviewed 25 of 25 pairs (100%) before confirming.',
+        ),
+        findsOneWidget,
+      );
+
+      final unlockedConfirmButton = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Run Confirm'),
+      );
+      expect(unlockedConfirmButton.onPressed, isNotNull);
+    },
+  );
+
+  testWidgets(
+    'opening the review dialog once still unlocks confirm even without '
+    'requesting additional sample batches (#53 is additive, not a '
+    'stricter gate)',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final buffer = StringBuffer();
+      for (var i = 0; i < 25; i++) {
+        buffer
+          ..writeln('Keep: /tmp/media-pipeline-test/keep$i.jpg')
+          ..writeln('Would trash: /tmp/media-pipeline-test/trash$i.jpg')
+          ..writeln();
+      }
+
+      final fakeRunner = _FakePipelineRunner(
+        outputs: {'delete-dry-run': buffer.toString()},
+      );
+
+      await tester.pumpWidget(MediaPipelineApp(runner: fakeRunner));
+
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run Step'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Move Duplicates To Trash'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review Duplicate Thumbnails'));
+      await tester.pumpAndSettle();
+
+      // Close immediately, without requesting another batch.
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+
+      // The gate is unchanged by #53: opening the dialog once is still
+      // enough, even though coverage is only a partial ~80% sample.
+      final unlockedConfirmButton = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Run Confirm'),
+      );
+      expect(unlockedConfirmButton.onPressed, isNotNull);
+      expect(
+        find.text('You reviewed 20 of 25 pairs (80%) before confirming.'),
+        findsOneWidget,
+      );
+    },
+  );
 }
 
 class _FakePipelineRunner extends PipelineRunner {
