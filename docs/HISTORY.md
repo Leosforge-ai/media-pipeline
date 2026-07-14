@@ -689,3 +689,36 @@ simpler and safer than continuing to enumerate failure modes.
 **Outcome:** `05_cleanup_scan.sh` now correctly treats only `0`/`11` as non-fatal and aborts on
 any other exit code, including OOM-kills and other signal deaths inside the planned container
 environment. PR #83 updated accordingly; still open for final review, not merged.
+
+## Phase 17 — Extract shared safe-file-move primitive (2026-07-14)
+
+**Context:** Astrid's review of PR #82 (the `11_restore_from_trash.sh` Dart port) flagged that
+the cross-device-safe, no-clobber file-move logic (rename with EXDEV fallback to
+copy+byte-verify+delete-original, cleaning up any partial/corrupt destination on failure) lived
+only inside `TrashRestorer`, private to `restore_from_trash.dart` — but issue #76's Phase 0b
+roadmap calls for porting three more confirm-gated destructive scripts
+(`06_delete_duplicates.sh`, `12_clean_immich_takeout_duplicates.sh`,
+`13_dedupe_live_photos.sh`) that each `mv` files into `$MEDIA_TRASH` using the identical `mv`
+no-clobber semantics. Doing those ports without extracting this logic first would have meant
+three near-duplicate re-implementations of safety-critical move logic.
+**Decisions:** Added `lib/src/filesystem_ops.dart` with `SafeFileMover` (`moveNoClobber`,
+`copyVerifyAndReplace`, the injectable `FileCopier` seam, and the shared `parentDirectory`
+dirname helper) — the exact logic previously in `TrashRestorer`, generalized to not be
+trash-specific. `restore_from_trash.dart`'s `TrashRestorer` is now a thin caller: it walks
+`$MEDIA_TRASH`, reconstructs original paths, and gates on dry-run/confirm, delegating every
+actual move to `SafeFileMover.moveNoClobber`. `parentDirectory` is re-exported from
+`restore_from_trash.dart` so existing importers keep working. Moved the generic-primitive tests
+(dirname, `copyVerifyAndReplace` copy/verify/cleanup behavior) from `restore_from_trash_test.dart`
+into a new `test/filesystem_ops_test.dart`, and added two new tests exercising
+`moveNoClobber` directly (move-with-mkdir, no-clobber-skip) now that the primitive is
+independently testable outside the trash-restore context. `restore_from_trash_test.dart` keeps
+the trash-specific coverage: path reconstruction, dry-run/confirm behavior, no-clobber in the
+trash-restore context, and the full round-trip.
+**Verification:** Pure refactor — `TrashRestorer`'s external behavior is unchanged. Test count:
+24 tests in `restore_from_trash_test.dart` before the split; 16 remain there (trash-specific)
+and 10 moved to `filesystem_ops_test.dart` (8 moved + 2 new `moveNoClobber` tests), confirming
+none were lost. Full suite (152 tests) and `flutter analyze` both pass clean.
+**Pivots:** None — a contained, same-behavior refactor per Astrid's review finding.
+**Outcome:** `SafeFileMover` is ready for the 06/12/13 ports (still Bash today, not part of this
+change) to reuse instead of each re-implementing the move-safety logic. Part of #76 and #77;
+not closing either — both stay open until those ports land.
