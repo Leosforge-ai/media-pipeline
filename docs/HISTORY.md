@@ -252,3 +252,59 @@ the old (broken) batch-subdirectory destination, was updated to assert the new f
 destination instead — it was testing the bug's own layout, not the safety gate, so there was no
 old-vs-new behavior to preserve there. All 13 tests in `tests/test_shell_scripts.py` pass;
 `ruff check scripts` clean.
+
+## Phase 8 — Boot-disk resolution: isolated raw-parse tests + single-call primitive (2026-07-14)
+
+**Context:** #59, a follow-up from Astrid's review of PR #58 (Phase 6). This was the third
+safety-relevant fix to `disk_name_from_partition()` in one merge cycle — PR #56 fixed
+single-hop-only LVM/btrfs chain walking, PR #58 fixed a missing `-d`/`--nodeps` flag that let
+child-partition rows leak into boot-disk detection. During PR #58's review, Astrid empirically
+proved (by testing three code variants) that the regression tests added for that fix only
+exercised the defensive first-line-truncation backstop, not the `-d` flag fix itself — running
+the tests with `-d` stripped (truncation kept) still passed all 29 tests silently, only failing
+when both the flag and the truncation were removed. Two real bugs in the same
+safety-critical function in one cycle suggested the underlying primitive — parsing `lsblk` text
+output and manually walking a parent chain one PKNAME hop at a time — was fragile enough to be
+worth reconsidering structurally, not just patching again.
+**Investigation (part 2 of #59):** Evaluated alternatives to manual PKNAME chain-walking for
+resolving a device to its top-level disk on Ubuntu/Debian (this repo's target, confirmed via
+README Requirements): `lsblk -no PKNAME --list` filtering (still requires the same manual
+per-hop loop, doesn't remove the bug class), `/sys/block/*` symlink parsing via `readlink -f`
+(works but reintroduces hand-rolled text/path parsing of a different kind, same fragility
+class), `udevadm info` chain queries (heavier, less directly aimed at "ancestor disk"), and
+`lsblk -s`/`--inverse` (built into util-linux lsblk specifically to print a device's full
+dependency chain in one call). Verified live on this repo's dev machine (Ubuntu 24.04,
+util-linux 2.39.3): `lsblk -o NAME,TYPE -P -s /dev/vda1` returns the complete ancestor chain
+(`vda1` then `vda`) in a single call, and confirmed a whole-disk device with children returns
+only its own row (no child-row leakage) — the exact failure mode `-d` was patched to prevent,
+eliminated structurally instead of by flag. `-s` has shipped since util-linux 2.21 (2012), well
+within this repo's Ubuntu/Debian-family target.
+**Decisions:** Replaced `disk_name_from_partition()`'s manual PKNAME-walking loop (hop counter,
+per-hop `lsblk -d -no TYPE`/`-no PKNAME` calls, first-line-truncation backstop) with a single
+`lsblk -o NAME,TYPE -P -s DEVICE` call, factored into its own `lsblk_ancestor_chain_raw()`
+function so the raw parsing step is unit-testable independent of the "pick the TYPE=disk row"
+filtering logic layered on top of it (part 1 of #59's ask: an isolated, lower-level test of the
+raw parse step before any higher-level filtering is applied). This removes the entire bug class
+both prior fixes patched — there is no loop, no hop counter, and no `-d` flag whose future
+omission could reintroduce child-row pollution, because lsblk itself is now responsible for
+building the correct ancestor chain in one call, the same way it already does internally to
+render its own tree view.
+**Pivots:** Part 1 of #59 asked specifically to isolate the old `-d`/`--nodeps` fix with a test
+that strips only that flag; since part 2's investigation concluded to replace the manual
+PKNAME-walking implementation entirely (removing `-d` from the code, not just testing around
+it), the isolation principle was applied to the new implementation's own raw-parse boundary
+instead: `test_lsblk_ancestor_chain_raw_isolation_catches_missing_dash_s_regression` mutates a
+copy of the script (surgically dropping only the `-s` flag from the one lsblk call in
+`lsblk_ancestor_chain_raw`) and proves, at that raw layer alone, the mutated call leaks child
+rows — mirroring Astrid's proof methodology for the old bug, aimed at the primitive actually
+shipped.
+**Outcome:** `tests/test_first_time_drive_setup.py` goes from 29 to 28 tests (three
+now-superseded #57-bug-2 regression tests, which asserted behavior of the removed manual loop,
+replaced by two new isolated raw-parse-layer tests: one proving `lsblk_ancestor_chain_raw`
+never leaks child rows for a whole-disk device, one proving a dropped-`-s` regression is caught
+at that layer directly). All three known disk-layout scenarios (simple partition, LVM chain,
+btrfs subvolume) remain covered end-to-end via `disk_name_from_partition`/`root_boot_disk`
+tests, now stubbing the single `-s` call instead of per-hop TYPE/PKNAME calls. Full suite (45
+tests across `tests/`) passes; `shellcheck -x -e SC1091 scripts/*.sh config/*.sh`, `shfmt -d`,
+and `ruff check scripts tests` all clean. Verified live against this repo's own dev machine
+(`root_boot_disk` correctly resolves to `vda`, the real boot disk).
