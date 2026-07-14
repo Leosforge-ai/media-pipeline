@@ -416,3 +416,50 @@ and "Review Another Sample" flow reach 100% cumulative coverage without ever re-
 and a case proving the original Phase 4 gate behavior is unchanged (opening the dialog once
 still unlocks confirm at any coverage percentage). Both of Phase 4's original gate tests pass
 unmodified. Full suite: 98 tests pass (`flutter test`); `flutter analyze` clean.
+
+## Phase 11 — PipelineRunner: separate stdout capture for the dedup parser (2026-07-14)
+
+**Context:** #54, follow-up from Cody's review of #49/PR #52. `PipelineRunner.run()` merges a
+step's stdout and stderr into one buffer via two independent stream listeners, but
+`duplicate_report.dart`'s "Keep:"/"Would trash:" parser implicitly assumed it was reading pure
+stdout. Not exploitable today — `06_delete_duplicates.sh` has no stderr writes on its success
+path — but a latent correctness assumption feeding a destructive-delete confirm gate: if a
+script (this one or a future one) ever wrote to stderr between two groups' announcement lines,
+an interleaved stderr line could theoretically strand a stale "Keep:" to later mispair with an
+unrelated "Would trash:" in the review dialog.
+**Decision:** Of the issue's three suggested directions, chose to split stdout/stderr at
+`PipelineRunner` itself (not a `duplicate_report.dart`-only filter, and not a
+`06_delete_duplicates.sh`-side invariant) — but additively, not by replacing the merged buffer.
+`PipelineRunner.run()`'s two existing stream listeners (`process.stdout`, `process.stderr`)
+still both write into the original combined `output` buffer and both still call `onLog` for
+every chunk exactly as before, so the live step-log UI's real-time interleaving is
+byte-for-byte unchanged — a human watching a long-running step still sees stdout and stderr
+interleaved as they actually arrive, nothing is hidden or reordered. The stdout listener
+additionally accumulates into a new, dedicated `stdoutOutput` buffer that never receives
+stderr content. `PipelineRunResult` gained `stdoutOutput` (alongside the existing `output`);
+`StepRunState` gained `stdoutLog` (alongside the existing `log`). `media_pipeline_app.dart`'s
+dedup-review call sites (`_openDedupReviewDialog`'s `dryRunLog` and the step-detail panel's
+`dedupDryRunLog` pair-count preview) now read `stdoutLog` instead of `log`; every other use of
+`log`/`output` (the visible step-log panel, guided-run completion state) is untouched.
+Rejected the `duplicate_report.dart`-only filter/tag approach: it would close the risk for this
+one parser but leave the same merged-buffer assumption open for any future safety-relevant
+parser that reads `StepRunState.log` — the issue explicitly flagged this as an architectural
+assumption, not just a bug in one call site. Rejected the script-side invariant alone (never
+write to stderr on `06_delete_duplicates.sh`'s success path): it's a reasonable belt-and-braces
+addition but doesn't fix the underlying `PipelineRunner` assumption either, and enforcing it
+only defers the same risk to the next script that grows a legitimate stderr write. Did not
+touch `06_delete_duplicates.sh` — no behavior-change or invariant-addition was needed once the
+fix moved to `PipelineRunner`.
+**Outcome:** `pipeline_runner_test.dart` gained a `stdout/stderr separation (issue #54)` group:
+one test spawns a real bash script that interleaves stdout ("Keep:"/"Would trash:" lines) with
+stderr writes between them, and asserts `stdoutOutput` contains zero stderr content while
+`output` (and every `onLog` chunk) still contains both, unchanged; a second test asserts
+`onLog` still fires for both streams exactly as before. `dedup_review_widget_test.dart` gained
+an end-to-end widget test with a new `_StreamSeparatedFakePipelineRunner` that returns a
+stdout-only capture different from its merged log (simulating a stray interleaved "Keep:" that
+only exists in the merged/stderr-contaminated stream) and proves the review dialog shows only
+the one real pair from stdout — the phantom "Keep:" never surfaces as a pair or leaks into the
+dialog — while remaining fully visible on the step's own log panel afterward, so nothing is
+silently dropped from the human-facing view. All pre-existing confirm-gate tests
+(`GuidedRunController` refusal tests, Phase 4/10 dedup gate tests) pass unmodified. Full suite:
+101 tests pass (`flutter test`); `flutter analyze` clean.
