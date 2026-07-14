@@ -607,3 +607,85 @@ mode moves + no-clobber, a full trash-convention round-trip matching scripts 06/
 and the PR #61/#63 regression class). Full suite: `flutter analyze` clean, `flutter test`
 146/146 passing (up from 126). Part of #76 and #77; neither issue closes — 06/12/13 and the
 Phase 0c/0d work remain.
+## Phase 16 — Fix `05_cleanup_scan.sh` aborting on found-count exit codes (2026-07-14)
+
+**Context:** Issue #81, found and reproduced during Cody's review of PR #80 (#76 Phase 1):
+`scripts/05_cleanup_scan.sh` runs under `set -euo pipefail` and pipes every `czkawka_cli`
+invocation through `tee` for logging. `czkawka_cli`'s exit code for the `image`/`video`/`dup`
+subcommands is a found-count, not a plain success flag — `0` means nothing found, any other
+value means N duplicates/similar items were found (the normal, expected outcome of a dedup
+scanner). Because of `pipefail`, that found-count propagated through the `tee` pipe as the
+pipeline's exit status, and `set -e` treated it as a fatal error — aborting the whole script
+the instant the *first* scan (image) found anything. The video scan, exact-duplicate scan,
+blur scan, and summary section never ran whenever duplicates existed, which is the common case,
+not an edge case. This was pre-existing, shipped behavior, flagged as a "Note for Phase 2" in
+Phase 14 above but out of scope for that container-only PR.
+**Decisions:** Captured `czkawka_cli`'s real exit code via `${PIPESTATUS[0]}` for every
+`czkawka_cli ... | tee ...` invocation (image, video, dup), instead of trusting pipefail's
+propagated pipeline status. Refactored the three near-identical invocations into one
+`run_czkawka_scan()` helper to keep the exit-code handling in one place. Distinguished a
+found-count (informational, must not abort the script) from a genuine tool failure (must still
+abort, per this repo's data-loss-prevention priority) by treating only exit codes attributable
+to a real crash/invocation failure as fatal: `101` (the default exit code for an uncaught Rust
+panic — `czkawka_cli` is a Rust binary) and `126`/`127` (standard "found but not executable" /
+"command not found" codes). Every other non-zero code is treated as an informational
+found-count. Also captured `tee`'s own exit code via `${PIPESTATUS[1]}` (both indices read in
+one `local` statement, since bash resets `PIPESTATUS` after every simple command) and treat a
+failed log write as a real, separate error. `06_delete_duplicates.sh`'s report-parsing format
+is unchanged — only `05`'s exit-code handling changed.
+**Verification:** Added a regression test (`tests/test_shell_scripts.py`,
+`CleanupScanExitCodeTests`) that plants two real, byte-identical duplicate files and runs
+`05_cleanup_scan.sh` against a fake `czkawka_cli` that does real work (hashes the real files
+under `-d`, writes real duplicate groups to `-f` in Czkawka's actual report format, then exits
+with the real group count) plus stub `ffmpeg`/`ffprobe`/`convert` so the script's tool-presence
+check passes without needing the real binaries installed. Confirmed the test would have caught
+the original bug: temporarily reverted the script fix and re-ran the test suite — both new
+tests failed (`1 != 0` on the found-duplicates case; the genuine-failure case never printed
+anything since the script died silently through pipefail before reaching the new error-handling
+path). Restored the fix and re-ran: both tests, plus the full existing suite (47 tests total),
+`shellcheck -x -e SC1091`, `shfmt -d`, and `ruff check` all pass clean.
+**Pivots:** None.
+**Outcome:** `05_cleanup_scan.sh` now runs all four scan types and prints the summary section
+regardless of how many duplicates each scan finds, while still surfacing and aborting on a
+genuine `czkawka_cli` crash or invocation failure. Closes #81.
+
+## Phase 16 — PR #83 review fixes: signal-death exit codes + exit-code terminology (2026-07-14)
+
+**Context:** Astrid and Cody's reviews of PR #83 (Phase 15) each found a gap.
+Astrid: the fatal-exit-code allowlist (`101`/`126`/`127`) didn't cover the standard Unix
+signal-death convention (a process killed by signal N exits with code `128+N`) — so `137`
+(SIGKILL, most commonly an OOM-kill) or `139` (SIGSEGV) would have been silently classified as
+"just found N duplicates" and a truncated/corrupt report trusted as complete. This matters
+concretely, not just in theory: `czkawka_cli` is planned to run inside a memory-limited Docker
+container per #76's roadmap (PR #80, already merged), where OOM-kills become materially more
+likely. Cody: pulled czkawka's actual upstream source (`czkawka_cli/src/main.rs`) and found the
+real "found duplicates" exit code is a **fixed constant, `11`** — not a variable found-count as
+Phase 15's comments, HISTORY entry, and test double all described. This didn't change Phase
+15's fix correctness (11 still lands in the "keep going" bucket either way), but the
+terminology was wrong.
+**Decisions:** Replaced the allowlist-of-known-fatal-codes approach with a denylist-of-
+known-safe-codes approach: only `0` (nothing found) and `11` (czkawka's real, fixed
+found-duplicates sentinel) are now treated as non-fatal; every other exit code aborts the
+script. This is both more correct (matches czkawka's actual, narrow exit-code contract) and
+fail-closed by construction — it automatically covers `137`/`139`/any other signal-death code
+(`128+N`) and any other unrecognized code, without needing to enumerate every possible crash
+mode. Kept `101`/`126`/`127` and the `128-255` signal-death range documented inline as known,
+named failure modes for diagnostic value, even though the actual conditional no longer needs to
+special-case them. Corrected all "found-count" language in the script's comments to describe
+the real fixed-`11` sentinel. Updated the fake `czkawka_cli` test double to exit `11` (not an
+arbitrary group count) when it plants duplicate groups, so it accurately models real czkawka
+behavior.
+**Verification:** Added `test_signal_death_exit_code_still_aborts_the_script`
+(`CleanupScanExitCodeTests`), parametrized over `137` and `139`, asserting the script aborts
+before the video scan or summary. Confirmed this test would have caught the gap: ran it against
+Phase 15's original fix commit (`9077097`) — both parametrized cases failed
+(`AssertionError: 0 == 0`, i.e. the script exited successfully on a simulated OOM-kill/segfault
+instead of aborting). Restored the corrected script and re-ran: full suite (48 tests total),
+`shellcheck -x -e SC1091`, `shfmt -d`, and `ruff check` all pass clean.
+**Pivots:** Switched from an allowlist of known-fatal codes to a denylist of known-safe codes
+(`{0, 11}`), per Astrid's signal-death finding and Cody's fixed-sentinel finding together —
+once the real exit-code contract is only two values, fail-closed on everything else is both
+simpler and safer than continuing to enumerate failure modes.
+**Outcome:** `05_cleanup_scan.sh` now correctly treats only `0`/`11` as non-fatal and aborts on
+any other exit code, including OOM-kills and other signal deaths inside the planned container
+environment. PR #83 updated accordingly; still open for final review, not merged.
