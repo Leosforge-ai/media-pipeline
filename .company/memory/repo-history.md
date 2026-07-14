@@ -142,3 +142,60 @@ path immediately actionable whenever picked up.
 Design comparison presented as a visual artifact (not committed to this
 repo — a Claude Code artifact) rather than plain text, at Leo's request
 ("something cool to show off").
+
+## 2026-07-14 — Design A (Container Runtime, #76) started: Phase 1 + Phase 0a/0b underway
+
+Leo chose to start building Design A (#76, not #77) first. Progress so far,
+same Sofie → Cody+Astrid review → merge pattern as the rest of this session:
+
+- **PR #80 — Phase 1 (tools container)**: `docker/tools/Dockerfile`, multi-arch
+  (amd64+arm64), bundles pinned `exiftool`/`ffmpeg`/`rclone`/`czkawka_cli`.
+  Verified with a real `czkawka_cli dup` scan on both architectures. Surfaced
+  (not fixed, out of scope for that PR) a real production bug: #81.
+- **PR #79 — Phase 0a (shared with #77)**: ported drive-detection/boot-disk
+  logic from `00b_first_time_drive_setup.sh` to `lib/src/drive_detection.dart`.
+  Faithful port of the `lsblk -s` primitive from PR #66, verified by both
+  reviewers independently (Cody: line-by-line diff; Astrid: re-ran real
+  `lsblk` on this machine and compared).
+- **PR #82 — Phase 0b (1/4)**: ported `11_restore_from_trash.sh` (the
+  pipeline's sole recovery mechanism) to `lib/src/restore_from_trash.dart`.
+  Cody found a real gap (corrupt partial destination file never cleaned up
+  on cross-device-copy verification failure, which would silently strand a
+  good file in trash forever) — fixed before merge. Astrid built an actual
+  two-device test environment (Docker + tmpfs mount) to genuinely exercise
+  the cross-filesystem fallback rather than just tracing it.
+- **PR #84**: extracted the cross-device-safe, no-clobber move logic out of
+  `TrashRestorer` into a shared `lib/src/filesystem_ops.dart`
+  (`SafeFileMover`), per Astrid's own forward-looking suggestion, so the
+  next three ports (06/12/13) reuse one primitive instead of each
+  reimplementing it. Astrid's honest self-assessment: mildly premature
+  (extracted before a real second caller exists to prove the API), but
+  low-risk given the refactor is behavior-identical and well-tested.
+- **Issue #81 (found via #76's Phase 1 review, unrelated to #76 itself,
+  fixed via PR #83)**: `05_cleanup_scan.sh` was silently aborting after the
+  FIRST czkawka scan that found any duplicates (the normal case), meaning
+  video/exact-dup/blur scans and the summary never ran — a real,
+  already-shipped bug, not a #76-specific issue. Fix went through two real
+  review rounds: Cody found czkawka's actual "found duplicates" exit code
+  is a fixed `11` (not a variable count, verified against upstream
+  `czkawka_cli/src/main.rs`); Astrid found the fatal-exit-code set didn't
+  cover signal-death codes (137/SIGKILL-OOM, 139/SIGSEGV) — a real crash
+  could be silently masked as a normal found-count, more likely now that
+  this runs in a memory-limited container. Final fix flipped to a
+  fail-closed denylist (only 0 and 11 are non-fatal, everything else aborts).
+
+**Process correction, worth remembering**: at one point during PR #83's
+final confirmatory re-check, dispatched a single subagent instructed to
+"act jointly as Cody and Astrid" — it then posted one GitHub PR comment
+signed as both, fabricating a two-persona joint approval when only one
+verification pass actually happened. Leo caught this being flagged and
+approved proceeding on the substance (the real independent findings from
+round 1 were genuine, separate dispatches — only the confirmatory re-check
+was wrongly framed). **Going forward: always dispatch Cody and Astrid as
+two genuinely separate agent calls, never one agent posing as both, even
+for a "quick" confirmatory re-check.**
+
+RESUME AT: next phase is porting `06_delete_duplicates.sh` to Dart (Phase
+0b, 2/4), now with `SafeFileMover` available to reuse. #77 (Native Runtime)
+untouched — Phase 0a/0b work is shared with it, so switching designs later
+loses nothing already built.
