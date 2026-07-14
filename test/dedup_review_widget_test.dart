@@ -290,6 +290,102 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'issue #54: the review dialog reads stdout-only output, so a stray '
+    'stderr line interleaved into the merged log can never mispair a '
+    'stale "Keep:" with an unrelated "Would trash:"',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      // Real stdout: one clean, unambiguous pair.
+      const cleanStdout =
+          'Keep: /tmp/media-pipeline-test/keep.mp4\n'
+          'Would trash: /tmp/media-pipeline-test/trash.mp4\n';
+
+      // What the *merged* stdout+stderr log would look like if the script
+      // ever wrote to stderr between two groups' announcement lines — a
+      // dangling "Keep:" with no matching "Would trash:" in this stream,
+      // exactly the corruption issue #54 describes. If the review dialog
+      // ever read the merged log instead of stdout-only, this would surface
+      // a phantom/mispaired second entry.
+      const corruptedMerged =
+          '$cleanStdout'
+          'Keep: /tmp/media-pipeline-test/stale-keep-from-stderr-race.mp4\n';
+
+      final fakeRunner = _StreamSeparatedFakePipelineRunner(
+        stdoutOutputs: {'delete-dry-run': cleanStdout},
+        mergedOutputs: {'delete-dry-run': corruptedMerged},
+      );
+
+      await tester.pumpWidget(MediaPipelineApp(runner: fakeRunner));
+
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run Step'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Move Duplicates To Trash'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review Duplicate Thumbnails'));
+      await tester.pumpAndSettle();
+
+      // Only the single real pair from stdout is shown — the dangling
+      // "Keep:" that only exists in the merged (stderr-contaminated) log
+      // never surfaces as a pair or a phantom entry.
+      expect(find.text('Showing all 1 pair.'), findsOneWidget);
+      expect(find.text('keep.mp4'), findsWidgets);
+      expect(find.text('trash.mp4'), findsWidgets);
+      expect(find.textContaining('stale-keep-from-stderr-race'), findsNothing);
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+
+      // The merged log is still visible in full on the dry-run step's own
+      // detail panel (the live step-log view), so the extra content is
+      // never silently hidden from the human operator — only kept out of
+      // the safety-relevant parse above.
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('stale-keep-from-stderr-race'), findsOneWidget);
+    },
+  );
+}
+
+/// Fake runner that can return a *different* merged (stdout+stderr) log
+/// than its stdout-only capture, so tests can simulate the interleaved
+/// stderr scenario from issue #54 without spawning real processes.
+class _StreamSeparatedFakePipelineRunner extends PipelineRunner {
+  _StreamSeparatedFakePipelineRunner({
+    required this.stdoutOutputs,
+    required this.mergedOutputs,
+  }) : super(workingDirectory: '.');
+
+  /// Step id -> canned stdout-only capture (what safety parsers must read).
+  final Map<String, String> stdoutOutputs;
+
+  /// Step id -> canned merged stdout+stderr capture (what the live step-log
+  /// UI displays).
+  final Map<String, String> mergedOutputs;
+
+  @override
+  Future<PipelineRunResult> run(
+    PipelineStep step,
+    PipelineSettings settings, {
+    LogSink? onLog,
+  }) async {
+    final merged = mergedOutputs[step.id] ?? '';
+    final stdoutOnly = stdoutOutputs[step.id] ?? '';
+    onLog?.call(merged);
+    return PipelineRunResult(
+      exitCode: 0,
+      output: merged,
+      stdoutOutput: stdoutOnly,
+    );
+  }
 }
 
 class _FakePipelineRunner extends PipelineRunner {
@@ -307,6 +403,6 @@ class _FakePipelineRunner extends PipelineRunner {
   }) async {
     final output = outputs[step.id] ?? '';
     onLog?.call(output);
-    return PipelineRunResult(exitCode: 0, output: output);
+    return PipelineRunResult(exitCode: 0, output: output, stdoutOutput: output);
   }
 }
