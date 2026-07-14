@@ -62,6 +62,21 @@ git clone <your-repo-url> media-pipeline
 cd media-pipeline
 
 ./scripts/00_check_system.sh
+```
+
+If the external drive isn't mounted yet (fresh machine, first run), run the
+first-time drive/Immich setup helper next. It detects unmounted candidate
+drives with `lsblk`/`blkid` (excluding the boot disk), and **prints, but never
+silently runs**, the exact mount/`fstab` commands for your drive's filesystem
+(ext4/ntfs/exfat) — you confirm each step interactively:
+
+```bash
+./scripts/00b_first_time_drive_setup.sh
+```
+
+Once the drive is mounted and its structure looks right, continue:
+
+```bash
 ./scripts/01_setup_dependencies.sh
 ```
 
@@ -74,10 +89,16 @@ confirm actions, and no permanent deletion.
 
 Current app status:
 
-- wraps the existing guarded script workflow;
+- wraps the existing guarded script workflow, with both a manual per-step
+  mode and a consolidated **Guided Run** mode that chains the safe steps
+  automatically and still stops at the same two human checkpoints (before
+  the duplicate-trash confirm, before the Immich rescan implied by syncing);
+- shows a side-by-side **duplicate thumbnail review** before the
+  duplicate-trash confirm step becomes reachable, sampling large sets with
+  an honest "N of M" count instead of asking you to trust raw report text;
 - shows Immich help and private-server setup guidance;
 - checks Immich with read-only API requests and a statistics panel;
-- tracks phone backup setup in a local non-secret checklist.
+- tracks phone backup setup in a local non-secret checklist;
 - includes a dry-run step for Google Takeout localized duplicate cleanup in the Immich library.
 
 Useful docs:
@@ -159,6 +180,22 @@ Inspect first. Only after review, optionally move verified duplicates from
 
 ```bash
 ./scripts/12_clean_immich_takeout_duplicates.sh --confirm
+```
+
+If Immich shows Apple Live Photos as two separate timeline assets (a still
+and a short motion clip, split apart by Google Takeout), dry-run the Live
+Photo dedupe step. By default it scans `immich_library`; set
+`LIVE_PHOTO_SCAN_DIR=$CLEANING_STAGING` to run it before syncing instead:
+
+```bash
+./scripts/13_dedupe_live_photos.sh | tee /tmp/live_photo_dedupe_dry_run.txt
+```
+
+Inspect first. Only after review, optionally move verified standalone motion
+videos into `media_trash` (the still is always kept):
+
+```bash
+./scripts/13_dedupe_live_photos.sh --confirm
 ```
 
 Install/start Immich:
@@ -276,6 +313,7 @@ Ubuntu or Debian-like Linux is recommended. The dependency script installs:
 - Similar-image and similar-video detection can have false positives. Review dry-runs.
 - Read-only Immich external libraries cannot be modified by Immich. If you trash items in Immich, the original files may reappear after rescan because the read-only mount prevents Immich from deleting originals.
 - If Immich shows duplicate assets from `Takeout/Google Fotos/YYYY/` and `Takeout/Google Fotos/Fotos de YYYY/`, fix the duplicate source files in `immich_library` with `12_clean_immich_takeout_duplicates.sh`, then restart Immich and rescan `/library`.
+- If Immich shows an Apple Live Photo as two separate assets (a still plus a 1-3s motion clip), Google Takeout split what was originally one Live Photo asset into two files sharing a basename. `13_dedupe_live_photos.sh` moves the redundant standalone motion clip to `media_trash`, keeping the still; it does not attempt to re-link them as a single Live Photo asset in Immich.
 
 
 ## CodeRabbit and CI/CD

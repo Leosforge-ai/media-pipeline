@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_pipeline_app/src/duplicate_report.dart';
 import 'package:media_pipeline_app/src/pipeline_models.dart';
 import 'package:media_pipeline_app/src/pipeline_runner.dart';
 
@@ -55,7 +56,38 @@ void main() {
         status: PipelineStepStatus.succeeded,
       ),
     };
-    expect(canRunStep(step: confirmStep, states: states), isTrue);
+
+    // The dry-run succeeding alone is no longer enough (#49): the
+    // thumbnail-diff review gate must also be explicitly acknowledged
+    // before the confirm step is reachable.
+    expect(canRunStep(step: confirmStep, states: states), isFalse);
+    expect(
+      canRunStep(
+        step: confirmStep,
+        states: states,
+        duplicateThumbnailReviewAcknowledged: false,
+      ),
+      isFalse,
+    );
+    expect(
+      canRunStep(
+        step: confirmStep,
+        states: states,
+        duplicateThumbnailReviewAcknowledged: true,
+      ),
+      isTrue,
+    );
+
+    // The review UI parses this exact dry-run output; prove against the
+    // real script's stdout (not a hand-written fixture) that it extracts
+    // the same keep/trash pair the script itself will act on. Use
+    // `stdoutOutput` (stdout-only), matching the app's own call sites
+    // (`_openDedupReviewDialog`, the pair-count preview) — see issue #54.
+    final parsed = parseDuplicateDryRunOutput(dryRun.stdoutOutput);
+    expect(parsed.orphanTrashLineCount, 0);
+    expect(parsed.pairs, [
+      DuplicateReviewPair(keepPath: keep.path, trashPath: trash.path),
+    ]);
 
     final confirm = await runner.run(confirmStep, settings);
     final trashed = File(

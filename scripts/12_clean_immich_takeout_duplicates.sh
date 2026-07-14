@@ -15,7 +15,6 @@ esac
 
 GOOGLE_FOTOS_DIR="$IMMICH_LIBRARY/Takeout/Google Fotos"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
-TRASH_BATCH="$MEDIA_TRASH/immich_library_fotos_de_duplicates_$RUN_TIMESTAMP"
 CONFIRM_PHRASE="MOVE TAKEOUT DUPLICATES"
 DRY_RUN=1
 
@@ -33,10 +32,12 @@ It keeps matching canonical files from:
 
 It never deletes files. Confirm mode moves verified duplicates to:
 
-  $TRASH_BATCH/
+  $MEDIA_TRASH/
 
-Default mode is dry-run. Stop Immich before confirm mode, then restart Immich
-and rescan the external library path /library after the move.
+(mirroring each file's full original absolute path, so
+11_restore_from_trash.sh can reverse it). Default mode is dry-run. Stop
+Immich before confirm mode, then restart Immich and rescan the external
+library path /library after the move.
 EOF
 
 echo
@@ -88,13 +89,22 @@ unique_destination() {
 	done
 }
 
+# Moved files mirror their full original absolute path under $MEDIA_TRASH
+# (the same layout scripts/06_delete_duplicates.sh and
+# scripts/13_dedupe_live_photos.sh already use), because
+# 11_restore_from_trash.sh reconstructs the original path by stripping only
+# the $MEDIA_TRASH/ prefix and prepending "/". A timestamped batch
+# subdirectory nested under $MEDIA_TRASH would survive as an extra path
+# segment and break that reconstruction (see #62), so it is intentionally
+# not used here. $RUN_TIMESTAMP is still recorded, in the printed summary
+# and in per-move log lines, for batch identification.
 move_or_report_duplicate() {
 	local duplicate="$1"
 	local canonical="$2"
 	local rel dst
 
-	rel="${duplicate#"$IMMICH_LIBRARY"/}"
-	dst="$TRASH_BATCH/$rel"
+	rel="${duplicate#/}"
+	dst="$MEDIA_TRASH/$rel"
 
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		echo "Would move duplicate: $duplicate -> $dst"
@@ -102,7 +112,7 @@ move_or_report_duplicate() {
 		dst="$(unique_destination "$dst")"
 		mkdir -p "$(dirname "$dst")"
 		mv "$duplicate" "$dst"
-		echo "Moved duplicate: $duplicate -> $dst"
+		echo "[$RUN_TIMESTAMP] Moved duplicate: $duplicate -> $dst"
 	fi
 	echo "Kept canonical: $canonical"
 }
@@ -185,6 +195,7 @@ done < <(find "$GOOGLE_FOTOS_DIR" -mindepth 1 -maxdepth 1 -type d -name 'Fotos d
 echo
 echo "Summary"
 echo "-------"
+echo "Run timestamp:        $RUN_TIMESTAMP"
 echo "Candidates inspected: $inspected"
 echo "Verified duplicates:  $verified"
 if [[ "$DRY_RUN" -eq 1 ]]; then
