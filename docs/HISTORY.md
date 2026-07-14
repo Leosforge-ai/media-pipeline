@@ -566,3 +566,44 @@ checking when Phase 2 wires the container's `czkawka_cli` into any pipefail-sens
 `docker/tools/Dockerfile`, documented in `docker/tools/README.md` (build commands, debugging
 shell, and a version-bump procedure per tool). Nothing in `scripts/*.sh` or `lib/**` was
 touched — no pipeline behavior changed. #76 stays open; only Phase 1 is complete.
+
+## Phase 15 — Dart port, Phase 0b (first script): restore-from-trash (2026-07-14)
+
+**Context:** Shared Phase 0 of #76/#77's roadmap calls for porting the four confirm-gated
+destructive scripts (`06_delete_duplicates.sh`, `11_restore_from_trash.sh`,
+`12_clean_immich_takeout_duplicates.sh`, `13_dedupe_live_photos.sh`) to Dart before any Bash
+script is retired. `11_restore_from_trash.sh` is the pipeline's sole recovery mechanism — every
+other destructive script relies on it to reverse a move-to-`media_trash`, and it had a real
+exit-code bug as recently as PR #61/#63 — so it is the first and highest-priority of the four to
+port, with the equivalent test rigor `drive_detection.dart` (Phase 0a) established.
+**Decisions:** Added `lib/src/restore_from_trash.dart`, mirroring `drive_detection.dart`'s shape:
+a pure `reconstructOriginalPath()` (strips the `$MEDIA_TRASH/` prefix and prepends `/`, exactly
+mirroring the Bash script's `rel="${f#"$MEDIA_TRASH"/}"; dest="/$rel"`) plus a pure
+`parentDirectory()` (`dirname` equivalent), and a thin `TrashRestorer` class doing the actual
+`Directory.list(recursive: true)` walk and `File.rename` move. No-clobber semantics
+(`mv -n`) are replicated exactly: an existing destination is left alone (`RestoreAction
+.skippedExisting`), never overwritten, and the trashed duplicate stays in `media_trash`,
+unresolved but never deleted. `TrashRestorer.run(confirm: false)` (the default) only computes and
+returns what *would* happen, touching nothing on disk — proven with real temp-directory
+mtime/content assertions, not just log-string checks. `File.rename`'s cross-filesystem limitation
+(unlike real `mv`, it doesn't transparently fall back across devices) is handled explicitly:
+`TrashRestorer._moveFile` catches the cross-device rename failure (`EXDEV`/errno 18) and falls
+back to copy + byte-length verification + delete-original, never deleting the trashed file before
+the copy is confirmed on disk. This fallback branch is implemented but not exercised by the test
+suite — reproducing genuine `EXDEV` needs two distinct mounted filesystems, unavailable in this
+sandbox/CI, and the test file documents this gap explicitly rather than claiming coverage that
+doesn't exist. Also added a direct regression test class for the PR #61/#63 bug (--confirm
+wrongly reporting failure via a bash trailing conditional under `set -e`): this port has no
+equivalent footgun by construction, since success/failure is signaled exclusively by
+`Future<List<RestoreOutcome>>` completing normally vs. throwing, with no separate exit-code/
+last-statement side channel a trailing print could hijack — proven with a fully successful
+--confirm-equivalent run and a fully successful empty-dry-run completing the Future normally.
+`scripts/11_restore_from_trash.sh` itself is untouched and remains the working fallback; this PR
+is additive only.
+**Pivots:** None.
+**Outcome:** `lib/src/restore_from_trash.dart` + `test/restore_from_trash_test.dart` (20 new
+tests: pure path reconstruction incl. spaces/unicode/nested paths, dry-run non-mutation, confirm
+mode moves + no-clobber, a full trash-convention round-trip matching scripts 06/12/13's layout,
+and the PR #61/#63 regression class). Full suite: `flutter analyze` clean, `flutter test`
+146/146 passing (up from 126). Part of #76 and #77; neither issue closes — 06/12/13 and the
+Phase 0c/0d work remain.
