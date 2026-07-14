@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'duplicate_report.dart';
+import 'guided_run_checkpoint_store.dart';
 import 'immich_connection.dart';
 import 'memory_curator.dart';
 import 'memory_feedback.dart';
@@ -16,14 +18,25 @@ class MediaPipelineApp extends StatelessWidget {
     super.key,
     this.immichClient,
     this.checklistStore,
+    this.guidedRunCheckpointStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
+    this.runner,
   });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  // Test-only seam: lets widget tests substitute an in-memory-backed store
+  // (a temp-directory-backed GuidedRunCheckpointStore) instead of the real
+  // app's local app-data directory. Left null in the real app.
+  final GuidedRunCheckpointStore? guidedRunCheckpointStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
+  // Test-only seam: lets widget tests substitute a fake PipelineRunner
+  // instead of spawning real pipeline scripts, so the delete-confirm
+  // thumbnail-review gate (#49) can be exercised end-to-end without side
+  // effects. Left null in the real app, which builds its own runner.
+  final PipelineRunner? runner;
 
   @override
   Widget build(BuildContext context) {
@@ -41,8 +54,10 @@ class MediaPipelineApp extends StatelessWidget {
       home: PipelineHomePage(
         immichClient: immichClient,
         checklistStore: checklistStore,
+        guidedRunCheckpointStore: guidedRunCheckpointStore,
         memoryPreviewState: memoryPreviewState,
         memoryPreviewMessage: memoryPreviewMessage,
+        runner: runner,
       ),
     );
   }
@@ -53,14 +68,18 @@ class PipelineHomePage extends StatefulWidget {
     super.key,
     this.immichClient,
     this.checklistStore,
+    this.guidedRunCheckpointStore,
     this.memoryPreviewState = MemoryPreviewDisplayState.sampleReady,
     this.memoryPreviewMessage,
+    this.runner,
   });
 
   final ImmichApiClient? immichClient;
   final ImmichChecklistStore? checklistStore;
+  final GuidedRunCheckpointStore? guidedRunCheckpointStore;
   final MemoryPreviewDisplayState memoryPreviewState;
   final String? memoryPreviewMessage;
+  final PipelineRunner? runner;
 
   @override
   State<PipelineHomePage> createState() => _PipelineHomePageState();
@@ -70,8 +89,34 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   final List<PipelineStep> _steps = buildPipelineSteps();
   final Map<String, StepRunState> _states = {};
   late final PipelineRunner _runner;
+  late final GuidedRunController _guidedRunController;
+  // Resolved via buildGuidedRunSteps(), which throws if the chain ever
+  // includes a PipelineRisk.confirmRequired step. Looking guided-run steps
+  // up through this map (instead of _steps directly) keeps that safety
+  // check live in the running app, not just exercised by tests that call
+  // buildGuidedRunSteps() in isolation.
+  late final Map<String, PipelineStep> _guidedRunStepsById;
+  late final List<List<String>> _guidedSegments;
+  int _guidedSegmentIndex = 0;
+  bool _guidedRunning = false;
+  GuidedRunResult? _guidedLastResult;
+  // How many steps at the start of the *current* segment (index
+  // _guidedSegmentIndex) have already succeeded, across possibly more than
+  // one _runNextGuidedSegment() call. Reset to 0 whenever the segment
+  // advances or a retry's settings differ from the failed attempt's. Lets a
+  // retry after a step failure resume from the failed step instead of
+  // re-running the whole segment from the top (issue #51, item 2).
+  int _guidedSegmentCompletedCount = 0;
+  // The PipelineSettings snapshot the current segment's steps have actually
+  // been run against so far. A retry only skips already-succeeded steps
+  // when this still matches the settings in effect for the retry — if the
+  // user edited hdPath/reportDir in between, those earlier successes ran
+  // against a different target and can no longer be trusted, so the
+  // segment restarts from its first step instead.
+  PipelineSettings? _guidedSegmentAttemptSettings;
   late final ImmichApiClient _immichClient;
   late final ImmichChecklistStore _checklistStore;
+  late final GuidedRunCheckpointStore _guidedRunCheckpointStore;
   late final TextEditingController _hdPathController;
   late final TextEditingController _immichApiKeyController;
   late final TextEditingController _immichUrlController;
@@ -85,6 +130,25 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   bool _checkingImmich = false;
   ImmichConnectionReport? _immichReport;
   ImmichConnectionException? _immichFailure;
+  // Whether a human has opened the thumbnail-diff duplicate review screen
+  // (issue #49) for the *current* "delete-dry-run" output at least once.
+  // Reset to false whenever that dry-run step starts running again, so a
+  // stale acknowledgment can never carry over to a new (possibly
+  // different) duplicate set. Read by canRunStep() as an additional,
+  // additive gate on top of the existing dry-run-succeeded requirement for
+  // "delete-confirm" — see PipelineStep.requiresDuplicateThumbnailReview.
+  bool _dedupReviewAcknowledged = false;
+
+  // Union of original-report indices (see `DuplicateReviewSample.
+  // shownIndices`) the human has actually had displayed in the thumbnail
+  // review dialog for the *current* "delete-dry-run" output, across
+  // possibly more than one sample batch (issue #53). Reset together with
+  // `_dedupReviewAcknowledged` whenever a fresh dry-run starts, for the
+  // same reason: a new duplicate set invalidates any prior coverage.
+  // Purely informational — it never gates `canRunStep()`, which still only
+  // requires `_dedupReviewAcknowledged` (opening the dialog once), so this
+  // is additive framing on top of an unchanged gate, not a new gate.
+  Set<int> _dedupReviewedIndices = {};
 
   PipelineStep get _selectedStep => _steps[_selectedIndex];
 
@@ -92,9 +156,17 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   void initState() {
     super.initState();
     _settings = PipelineSettings.defaults();
-    _runner = PipelineRunner(workingDirectory: Directory.current.path);
+    _runner =
+        widget.runner ?? PipelineRunner(workingDirectory: Directory.current.path);
+    _guidedRunController = GuidedRunController(runner: _runner);
+    _guidedRunStepsById = {
+      for (final step in buildGuidedRunSteps()) step.id: step,
+    };
+    _guidedSegments = buildGuidedRunSegments();
     _immichClient = widget.immichClient ?? ImmichApiClient();
     _checklistStore = widget.checklistStore ?? ImmichChecklistStore();
+    _guidedRunCheckpointStore =
+        widget.guidedRunCheckpointStore ?? GuidedRunCheckpointStore();
     _hdPathController = TextEditingController(text: _settings.hdPath);
     _immichUrlController = TextEditingController(text: 'http://localhost:2283');
     _immichApiKeyController = TextEditingController();
@@ -106,6 +178,41 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       _states[step.id] = const StepRunState();
     }
     unawaited(_loadPhoneChecklists());
+    unawaited(_loadGuidedRunCheckpoint());
+  }
+
+  /// Restores `_guidedSegmentIndex` from a previously persisted checkpoint
+  /// (issue #51, item 1), so an app restart mid-guided-run shows "Continue
+  /// Guided Run" at the right point instead of silently resetting to
+  /// segment 0. A missing, corrupt, or stale (see
+  /// `GuidedRunCheckpoint.isStale`) checkpoint just leaves the guided run
+  /// starting fresh, same as before this existed.
+  Future<void> _loadGuidedRunCheckpoint() async {
+    try {
+      final checkpoint = await _guidedRunCheckpointStore.load();
+      if (!mounted || checkpoint == null) {
+        return;
+      }
+      if (checkpoint.isStale(
+        currentHdPath: _settings.hdPath,
+        currentReportDir: _settings.reportDir,
+      )) {
+        unawaited(_guidedRunCheckpointStore.clear());
+        return;
+      }
+      final restoredIndex = checkpoint.segmentIndex
+          .clamp(0, _guidedSegments.length)
+          .toInt();
+      if (restoredIndex <= 0) {
+        return;
+      }
+      setState(() {
+        _guidedSegmentIndex = restoredIndex;
+      });
+    } catch (_) {
+      // Non-fatal: a corrupt/unreadable checkpoint file just means the
+      // guided run starts from segment 0, same as if none existed.
+    }
   }
 
   @override
@@ -184,7 +291,12 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
 
   Future<void> _runSelectedStep() async {
     final step = _selectedStep;
-    if (_runningStepId != null || !canRunStep(step: step, states: _states)) {
+    final canRun = canRunStep(
+      step: step,
+      states: _states,
+      duplicateThumbnailReviewAcknowledged: _dedupReviewAcknowledged,
+    );
+    if (_runningStepId != null || !canRun) {
       return;
     }
 
@@ -195,6 +307,13 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       );
       _runningStepId = step.id;
       _states[step.id] = const StepRunState(status: PipelineStepStatus.running);
+      if (step.id == 'delete-dry-run') {
+        // A fresh dry-run can produce a different duplicate set, so any
+        // earlier thumbnail-review acknowledgment — and any sample-coverage
+        // tracking (#53) — no longer applies.
+        _dedupReviewAcknowledged = false;
+        _dedupReviewedIndices = {};
+      }
     });
 
     final result = await _runner.run(
@@ -223,8 +342,248 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
             : PipelineStepStatus.failed,
         exitCode: result.exitCode,
         log: result.output,
+        stdoutLog: result.stdoutOutput,
       );
     });
+  }
+
+  /// Resolves a guided-run step id via [_guidedRunStepsById] (built from
+  /// [buildGuidedRunSteps]) rather than [_steps] directly, so every guided
+  /// step the app actually runs has passed that function's confirm-gate
+  /// safety check.
+  PipelineStep _guidedStepById(String id) {
+    final step = _guidedRunStepsById[id];
+    if (step == null) {
+      throw StateError(
+        'Guided run segment references step id "$id" that is not part of '
+        'the validated guided run chain.',
+      );
+    }
+    return step;
+  }
+
+  bool get _guidedRunFinished => _guidedSegmentIndex >= _guidedSegments.length;
+
+  bool get _canRunNextGuidedSegment {
+    if (_guidedRunning || _runningStepId != null || _guidedRunFinished) {
+      return false;
+    }
+    return _guidedSegments[_guidedSegmentIndex]
+        .map(_guidedStepById)
+        .every(isStepSupportedOnCurrentPlatform);
+  }
+
+  String get _guidedRunButtonLabel {
+    if (_guidedRunFinished) {
+      return 'Guided Run Complete';
+    }
+    return _guidedSegmentIndex == 0 ? 'Run Guided Pipeline' : 'Continue Guided Run';
+  }
+
+  String get _guidedRunStatusMessage {
+    if (_guidedRunning) {
+      return 'Guided run in progress…';
+    }
+
+    final lastResult = _guidedLastResult;
+    if (lastResult == null) {
+      return 'Chains the safe/review steps (system check through duplicate '
+          'scan, the dedup dry-run, cleanup verification, and Immich sync) '
+          'automatically. It always stops before "Move Duplicates To Trash" '
+          'and before an Immich rescan for an explicit manual step.';
+    }
+
+    if (lastResult.outcome == GuidedRunOutcome.stepFailed) {
+      return 'Guided run stopped: "${lastResult.failedStepId}" failed '
+          '(exit ${lastResult.failedExitCode}). Review its log, fix the '
+          'issue, then continue — it resumes from this step, not the start '
+          'of the segment (unless you changed the HD path or report '
+          'directory, which restarts the segment from its first step).';
+    }
+
+    if (lastResult.outcome == GuidedRunOutcome.aborted) {
+      return 'Guided run was cancelled before finishing this segment.';
+    }
+
+    // outcome == completed
+    if (_guidedRunFinished) {
+      return 'Guided run finished through the Immich library sync. Review '
+          'it, then continue manually with the Immich rescan / setup and '
+          'verification steps in the list.';
+    }
+
+    final justFinishedCheckpoint = _guidedSegments[_guidedSegmentIndex - 1].last;
+    if (justFinishedCheckpoint == 'delete-dry-run') {
+      return 'Checkpoint reached: review the duplicate move plan in the '
+          '"Review Duplicate Move Plan" step\'s output. Manually run "Move '
+          'Duplicates To Trash" if you want to delete, or skip it — then '
+          'continue the guided run.';
+    }
+    return 'Guided run segment finished. Continue when ready.';
+  }
+
+  Future<void> _runNextGuidedSegment() async {
+    if (!_canRunNextGuidedSegment) {
+      return;
+    }
+
+    final fullSegmentStepIds = _guidedSegments[_guidedSegmentIndex];
+    final attemptSettings = _settings.copyWith(
+      hdPath: _hdPathController.text.trim(),
+      reportDir: _reportDirController.text.trim(),
+    );
+
+    // Resume from the step that failed last time instead of re-running the
+    // whole segment from the top (issue #51, item 2) — but only when the
+    // settings driving this attempt are unchanged from the failed one.
+    // Earlier steps in this segment already succeeded against
+    // _guidedSegmentAttemptSettings; if the human edited the HD path or
+    // report directory before retrying, those successes no longer describe
+    // the target this attempt will actually run against, so re-validate by
+    // restarting the segment from its first step instead of trusting them.
+    final previousAttemptSettings = _guidedSegmentAttemptSettings;
+    final settingsUnchanged =
+        previousAttemptSettings != null &&
+        previousAttemptSettings.hdPath == attemptSettings.hdPath &&
+        previousAttemptSettings.reportDir == attemptSettings.reportDir;
+    final resumeFromIndex = settingsUnchanged
+        ? _guidedSegmentCompletedCount
+              .clamp(0, fullSegmentStepIds.length)
+              .toInt()
+        : 0;
+    final segmentStepIds = fullSegmentStepIds.sublist(resumeFromIndex);
+    final segmentSteps = segmentStepIds.map(_guidedStepById).toList();
+
+    setState(() {
+      _settings = attemptSettings;
+      _guidedSegmentAttemptSettings = attemptSettings;
+      _guidedRunning = true;
+    });
+
+    final result = await _guidedRunController.run(
+      steps: segmentSteps,
+      settings: _settings,
+      onStepStart: (step) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _runningStepId = step.id;
+          _states[step.id] = const StepRunState(
+            status: PipelineStepStatus.running,
+          );
+          if (step.id == 'delete-dry-run') {
+            // Same invalidation rule as the manual single-step run path.
+            _dedupReviewAcknowledged = false;
+            _dedupReviewedIndices = {};
+          }
+        });
+      },
+      onStepComplete: (step, stepResult) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _runningStepId = null;
+          _states[step.id] = (_states[step.id] ?? const StepRunState())
+              .copyWith(
+                status: stepResult.succeeded
+                    ? PipelineStepStatus.succeeded
+                    : PipelineStepStatus.failed,
+                exitCode: stepResult.exitCode,
+                log: stepResult.output,
+                stdoutLog: stepResult.stdoutOutput,
+              );
+        });
+      },
+      onLog: (chunk) {
+        final currentStepId = _runningStepId;
+        if (!mounted || currentStepId == null) {
+          return;
+        }
+        setState(() {
+          final current = _states[currentStepId] ?? const StepRunState();
+          _states[currentStepId] = current.copyWith(log: current.log + chunk);
+        });
+      },
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _guidedRunning = false;
+      _guidedLastResult = result;
+      _guidedSegmentCompletedCount =
+          resumeFromIndex + result.completedStepIds.length;
+      if (result.outcome == GuidedRunOutcome.completed) {
+        _guidedSegmentIndex += 1;
+        _guidedSegmentCompletedCount = 0;
+        _guidedSegmentAttemptSettings = null;
+      }
+    });
+
+    // Persist checkpoint progress (issue #51, item 1) only on a fully
+    // completed segment: a step failure or abort doesn't move
+    // _guidedSegmentIndex, so there's nothing new to persist there — the
+    // in-memory retry-from-failed-step state above already covers resuming
+    // within the current app session.
+    if (result.outcome == GuidedRunOutcome.completed) {
+      if (_guidedRunFinished) {
+        unawaited(_guidedRunCheckpointStore.clear());
+      } else {
+        unawaited(
+          _guidedRunCheckpointStore.save(
+            GuidedRunCheckpoint(
+              segmentIndex: _guidedSegmentIndex,
+              hdPath: _settings.hdPath,
+              reportDir: _settings.reportDir,
+              updatedAt: DateTime.now(),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Opens the thumbnail-diff duplicate review dialog (#49) for the current
+  /// "delete-dry-run" output and records that it was shown.
+  ///
+  /// Marking the review acknowledged as soon as the dialog is opened (not
+  /// only after it closes) is intentional: opening it is the concrete,
+  /// testable user action this gate requires — see
+  /// `PipelineStep.requiresDuplicateThumbnailReview` and `canRunStep()`.
+  /// This never runs any command and never touches the filesystem beyond
+  /// the read-only `Image.file` thumbnails inside the dialog.
+  Future<void> _openDedupReviewDialog() async {
+    // Stdout-only: the review dialog parses "Keep:"/"Would trash:"
+    // announcements, a safety-relevant read that must never be able to pick
+    // up an interleaved stderr line — see `StepRunState.stdoutLog` and
+    // issue #54.
+    final dryRunLog = _states['delete-dry-run']?.stdoutLog ?? '';
+    setState(() {
+      _dedupReviewAcknowledged = true;
+    });
+    await showDialog<void>(
+      context: context,
+      builder: (context) => _DuplicateThumbnailReviewDialog(
+        dryRunOutput: dryRunLog,
+        initialReviewedIndices: _dedupReviewedIndices,
+        // Updated live as the human requests additional sample batches
+        // (#53), not only when the dialog closes, so a coverage panel
+        // reading `_dedupReviewedIndices` from outside the dialog can never
+        // show a stale percentage even if the app is torn down mid-review.
+        onReviewedIndicesChanged: (indices) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _dedupReviewedIndices = indices;
+          });
+        },
+      ),
+    );
   }
 
   Future<void> _checkImmichConnection() async {
@@ -329,15 +688,27 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                       child: switch (_mode) {
                         _AppMode.workflow => ListView.builder(
                           padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-                          itemCount: _steps.length,
+                          // +1: a leading guided-run control card ahead of
+                          // the per-step list, kept inside this scrollable
+                          // region so it can never overflow the sidebar.
+                          itemCount: _steps.length + 1,
                           itemBuilder: (context, index) {
-                            final step = _steps[index];
+                            if (index == 0) {
+                              return _GuidedRunPanel(
+                                buttonLabel: _guidedRunButtonLabel,
+                                statusMessage: _guidedRunStatusMessage,
+                                enabled: _canRunNextGuidedSegment,
+                                running: _guidedRunning,
+                                onRun: _runNextGuidedSegment,
+                              );
+                            }
+                            final step = _steps[index - 1];
                             return _StepTile(
                               step: step,
                               state: _states[step.id] ?? const StepRunState(),
-                              selected: index == _selectedIndex,
+                              selected: (index - 1) == _selectedIndex,
                               onTap: () =>
-                                  setState(() => _selectedIndex = index),
+                                  setState(() => _selectedIndex = index - 1),
                             );
                           },
                         ),
@@ -357,9 +728,27 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                   state: _states[_selectedStep.id] ?? const StepRunState(),
                   canRun:
                       _runningStepId == null &&
-                      canRunStep(step: _selectedStep, states: _states),
+                      canRunStep(
+                        step: _selectedStep,
+                        states: _states,
+                        duplicateThumbnailReviewAcknowledged:
+                            _dedupReviewAcknowledged,
+                      ),
                   running: _runningStepId == _selectedStep.id,
                   onRun: _runSelectedStep,
+                  dryRunSucceeded: _selectedStep.requiresDryRunStepId == null
+                      ? true
+                      : _states[_selectedStep.requiresDryRunStepId]?.status ==
+                          PipelineStepStatus.succeeded,
+                  dedupReviewAcknowledged: _dedupReviewAcknowledged,
+                  // Stdout-only for the same reason as `_openDedupReviewDialog`
+                  // above — this feeds the pair-count preview through the
+                  // same safety-relevant parser.
+                  dedupDryRunLog: _states['delete-dry-run']?.stdoutLog,
+                  dedupReviewedCount: _dedupReviewedIndices.length,
+                  onOpenDedupReview: _selectedStep.requiresDuplicateThumbnailReview
+                      ? _openDedupReviewDialog
+                      : null,
                 ),
                 _AppMode.immich => _ImmichConnectionDetail(
                   serverUrlController: _immichUrlController,
@@ -1734,6 +2123,62 @@ class _AppHeader extends StatelessWidget {
   }
 }
 
+class _GuidedRunPanel extends StatelessWidget {
+  const _GuidedRunPanel({
+    required this.buttonLabel,
+    required this.statusMessage,
+    required this.enabled,
+    required this.running,
+    required this.onRun,
+  });
+
+  final String buttonLabel;
+  final String statusMessage;
+  final bool enabled;
+  final bool running;
+  final VoidCallback onRun;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: colorScheme.outlineVariant),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.playlist_add_check, size: 18),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text('Guided Run', style: textTheme.titleSmall),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(statusMessage, style: textTheme.bodySmall),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: enabled ? onRun : null,
+                icon: Icon(running ? Icons.hourglass_top : Icons.fast_forward),
+                label: Text(running ? 'Running…' : buttonLabel),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SettingsPanel extends StatelessWidget {
   const _SettingsPanel({
     required this.hdPathController,
@@ -1821,6 +2266,11 @@ class _StepDetail extends StatelessWidget {
     required this.canRun,
     required this.running,
     required this.onRun,
+    this.dryRunSucceeded = true,
+    this.dedupReviewAcknowledged = false,
+    this.dedupDryRunLog,
+    this.dedupReviewedCount = 0,
+    this.onOpenDedupReview,
   });
 
   final PipelineStep step;
@@ -1829,10 +2279,40 @@ class _StepDetail extends StatelessWidget {
   final bool running;
   final VoidCallback onRun;
 
+  /// Whether the dry-run step this step depends on (per
+  /// `requiresDryRunStepId`) has succeeded. Defaults to `true` for steps
+  /// with no dry-run dependency.
+  final bool dryRunSucceeded;
+
+  /// Whether the thumbnail-diff duplicate review (#49) has been shown for
+  /// the current dry-run output. Only meaningful when
+  /// `step.requiresDuplicateThumbnailReview` is true.
+  final bool dedupReviewAcknowledged;
+
+  /// The "delete-dry-run" step's captured stdout, used to show a pair
+  /// count / preview summary without opening the review dialog. Only read
+  /// when `step.requiresDuplicateThumbnailReview` is true.
+  final String? dedupDryRunLog;
+
+  /// Count of distinct pairs the human has actually had displayed across
+  /// every sample batch reviewed so far for the current dry-run output
+  /// (#53). Only meaningful when `step.requiresDuplicateThumbnailReview`
+  /// is true; purely informational, never a gate input.
+  final int dedupReviewedCount;
+
+  /// Opens the thumbnail-diff review dialog. Non-null only when
+  /// `step.requiresDuplicateThumbnailReview` is true.
+  final VoidCallback? onOpenDedupReview;
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    final blockedReason = _blockedReason(step, canRun: canRun);
+    final blockedReason = _blockedReason(
+      step,
+      canRun: canRun,
+      dryRunSucceeded: dryRunSucceeded,
+      dedupReviewAcknowledged: dedupReviewAcknowledged,
+    );
     return Padding(
       padding: const EdgeInsets.all(24),
       child: Column(
@@ -1881,6 +2361,18 @@ class _StepDetail extends StatelessWidget {
               ),
             ],
           ),
+          if (step.requiresDuplicateThumbnailReview) ...[
+            const SizedBox(height: 16),
+            _DedupReviewPanel(
+              dryRunSucceeded: dryRunSucceeded,
+              acknowledged: dedupReviewAcknowledged,
+              pairCount: parseDuplicateDryRunOutput(
+                dedupDryRunLog ?? '',
+              ).pairs.length,
+              reviewedCount: dedupReviewedCount,
+              onOpenReview: onOpenDedupReview,
+            ),
+          ],
           if (blockedReason != null) ...[
             const SizedBox(height: 12),
             Text(
@@ -1964,12 +2456,24 @@ String _newChecklistId() {
   return DateTime.now().microsecondsSinceEpoch.toString();
 }
 
-String? _blockedReason(PipelineStep step, {required bool canRun}) {
+String? _blockedReason(
+  PipelineStep step, {
+  required bool canRun,
+  bool dryRunSucceeded = true,
+  bool dedupReviewAcknowledged = false,
+}) {
   if (step.linuxOnly && !Platform.isLinux) {
     return 'This step is enabled only on Linux or ChromeOS Linux in v1.';
   }
-  if (step.requiresDryRunStepId != null && !canRun) {
+  if (canRun || step.requiresDryRunStepId == null) {
+    return null;
+  }
+  if (!dryRunSucceeded) {
     return 'This confirm step is locked until its dry-run step succeeds in this app session.';
+  }
+  if (step.requiresDuplicateThumbnailReview && !dedupReviewAcknowledged) {
+    return 'This confirm step is locked until you review the duplicate-thumbnail '
+        'comparison below at least once.';
   }
   return null;
 }
@@ -2015,4 +2519,469 @@ String _failureTitle(ImmichConnectionIssue issue) {
     ImmichConnectionIssue.missingPermission => 'Missing permission',
     ImmichConnectionIssue.unexpectedResponse => 'Unexpected response',
   };
+}
+
+/// Inline summary + entry point for the thumbnail-diff duplicate review
+/// (#49), shown on the "delete-confirm" step's detail panel — directly
+/// above the "Run Confirm" button, so it's the last thing seen before the
+/// confirm action, not something a skim past a dialog header could miss.
+///
+/// Per #53 (follow-up from Astrid's #52 review): once reviewed, this panel
+/// always states the reviewed-vs-total pair count as an explicit
+/// percentage right here, and a coverage chip color-codes how much of the
+/// duplicate set that percentage represents. This is framing only — it
+/// never changes what unlocks "Run Confirm"; the gate mechanics in
+/// `canRunStep()` are unchanged (still just "was the dialog opened").
+class _DedupReviewPanel extends StatelessWidget {
+  const _DedupReviewPanel({
+    required this.dryRunSucceeded,
+    required this.acknowledged,
+    required this.pairCount,
+    required this.reviewedCount,
+    required this.onOpenReview,
+  });
+
+  final bool dryRunSucceeded;
+  final bool acknowledged;
+  final int pairCount;
+
+  /// Distinct pairs actually displayed across every sample batch reviewed
+  /// so far for the current dry-run output.
+  final int reviewedCount;
+  final VoidCallback? onOpenReview;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final coveragePercent = duplicateReviewCoveragePercent(
+      reviewedCount,
+      pairCount,
+    );
+
+    final String message;
+    if (!dryRunSucceeded) {
+      message =
+          'Run "Review Duplicate Move Plan" successfully first to unlock the '
+          'thumbnail review.';
+    } else if (acknowledged) {
+      message =
+          'Re-run the dry-run step if the duplicate set changes; re-review '
+          'before confirming again.';
+    } else {
+      message =
+          'Before you can confirm, review side-by-side thumbnails of every '
+          'proposed keep/trash pair ($pairCount found, or a sample for '
+          'large runs) so you can trust the move plan without reading raw '
+          'Czkawka text output.';
+    }
+
+    // Coverage-severity color: this is purely a visual trust signal (never
+    // a gate) so a human weighing "should I look at more before I confirm"
+    // has an immediate, hard-to-miss read at a glance.
+    final Color coverageColor;
+    if (!acknowledged) {
+      coverageColor = colorScheme.error;
+    } else if (coveragePercent >= 100) {
+      coverageColor = colorScheme.primary;
+    } else if (coveragePercent >= 50) {
+      coverageColor = Colors.orange;
+    } else {
+      coverageColor = colorScheme.error;
+    }
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: acknowledged ? colorScheme.outlineVariant : colorScheme.error,
+        ),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  acknowledged ? Icons.check_circle : Icons.image_search,
+                  size: 18,
+                  color: acknowledged ? colorScheme.primary : colorScheme.error,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    acknowledged
+                        ? 'Duplicate thumbnail review: reviewed'
+                        : 'Duplicate thumbnail review required',
+                    style: textTheme.titleSmall,
+                  ),
+                ),
+              ],
+            ),
+            if (acknowledged) ...[
+              const SizedBox(height: 8),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: coverageColor.withValues(alpha: 0.12),
+                  border: Border.all(color: coverageColor),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.pie_chart, size: 16, color: coverageColor),
+                      const SizedBox(width: 6),
+                      Text(
+                        'You reviewed $reviewedCount of $pairCount pairs '
+                        '($coveragePercent%) before confirming.',
+                        style: textTheme.bodyMedium?.copyWith(
+                          color: coverageColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Text(message, style: textTheme.bodySmall),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: dryRunSucceeded ? onOpenReview : null,
+              icon: const Icon(Icons.compare),
+              label: Text(
+                acknowledged
+                    ? 'Review Duplicate Thumbnails Again'
+                    : 'Review Duplicate Thumbnails',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Modal thumbnail-diff review for the "delete-dry-run" output (#49).
+///
+/// Parses the dry-run stdout with [parseDuplicateDryRunOutput] (never the
+/// bash script's own Czkawka-report parsing) and renders a sampled subset
+/// via [sampleDuplicateReviewPairs], always showing an honest "N of M"
+/// count so nothing is silently hidden from large runs.
+///
+/// #53: for a large duplicate set, the initial sample alone can cover a
+/// small slice of the total (e.g. 20 of 143 ≈ 14%). This dialog now also
+/// tracks cumulative reviewed coverage across every batch shown so far —
+/// starting from [initialReviewedIndices], which lets a re-opened dialog
+/// resume from where a prior review session left off instead of resetting
+/// — and offers a "Review Another Sample" button so a human who wants more
+/// confidence than the first batch gives can page through additional,
+/// non-overlapping batches before confirming. This is opt-in, extra
+/// context: it never changes when the confirm gate unlocks (still "the
+/// dialog was opened at least once" — see `canRunStep()`), only how
+/// informed the human can choose to be before they use that unlock.
+class _DuplicateThumbnailReviewDialog extends StatefulWidget {
+  const _DuplicateThumbnailReviewDialog({
+    required this.dryRunOutput,
+    this.initialReviewedIndices = const {},
+    this.onReviewedIndicesChanged,
+  });
+
+  final String dryRunOutput;
+  final Set<int> initialReviewedIndices;
+  final ValueChanged<Set<int>>? onReviewedIndicesChanged;
+
+  @override
+  State<_DuplicateThumbnailReviewDialog> createState() =>
+      _DuplicateThumbnailReviewDialogState();
+}
+
+class _DuplicateThumbnailReviewDialogState
+    extends State<_DuplicateThumbnailReviewDialog> {
+  late final List<DuplicateReviewPair> _allPairs;
+  late Set<int> _reviewedIndices;
+  late DuplicateReviewSample _sample;
+  int _batchNumber = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _allPairs = parseDuplicateDryRunOutput(widget.dryRunOutput).pairs;
+    _reviewedIndices = {...widget.initialReviewedIndices};
+    // Always show a fresh batch on open rather than re-displaying whatever
+    // was on screen last time — draws from indices not yet reviewed first,
+    // so re-opening the dialog after a partial review keeps making
+    // progress instead of repeating the same pairs.
+    _sample = sampleAdditionalDuplicateReviewPairs(
+      _allPairs,
+      _reviewedIndices,
+      batchNumber: _batchNumber,
+    );
+    _reviewedIndices.addAll(_sample.shownIndices);
+    // Deferred to after this frame: initState() runs while the framework
+    // is still building the dialog's route, so calling setState() on the
+    // ancestor _PipelineHomePageState synchronously here would hit a
+    // "setState() called during build" error. A post-frame callback is
+    // safe because by then the current build pass has finished.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _notifyReviewedIndicesChanged(),
+    );
+  }
+
+  void _notifyReviewedIndicesChanged() {
+    widget.onReviewedIndicesChanged?.call({..._reviewedIndices});
+  }
+
+  bool get _hasMoreToReview => _reviewedIndices.length < _allPairs.length;
+
+  void _reviewAnotherSample() {
+    setState(() {
+      _batchNumber += 1;
+      _sample = sampleAdditionalDuplicateReviewPairs(
+        _allPairs,
+        _reviewedIndices,
+        batchNumber: _batchNumber,
+      );
+      _reviewedIndices.addAll(_sample.shownIndices);
+    });
+    _notifyReviewedIndicesChanged();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final parsedOrphanCount = parseDuplicateDryRunOutput(
+      widget.dryRunOutput,
+    ).orphanTrashLineCount;
+    final sample = _sample;
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    final cumulativeCoveragePercent = duplicateReviewCoveragePercent(
+      _reviewedIndices.length,
+      _allPairs.length,
+    );
+
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 680),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Review Duplicate Move Plan',
+                      style: textTheme.titleLarge,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close',
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                sample.totalPairs == 0
+                    ? 'No keep/trash pairs were found in the dry-run output.'
+                    : sample.isSampled
+                    ? 'Showing ${sample.shown.length} of ${sample.totalPairs} '
+                          'pairs (batch ${_batchNumber + 1}) — full list in '
+                          'the dry-run report.'
+                    : 'Showing all ${sample.shown.length} '
+                          'pair${sample.shown.length == 1 ? '' : 's'}.',
+                style: textTheme.bodySmall,
+              ),
+              if (sample.totalPairs > 0) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'Cumulative: reviewed ${_reviewedIndices.length} of '
+                  '${_allPairs.length} pairs ($cumulativeCoveragePercent%) '
+                  'across every batch you\'ve opened.',
+                  style: textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: cumulativeCoveragePercent >= 100
+                        ? colorScheme.primary
+                        : colorScheme.error,
+                  ),
+                ),
+              ],
+              if (parsedOrphanCount > 0) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '$parsedOrphanCount "Would trash" line'
+                  '${parsedOrphanCount == 1 ? '' : 's'} could not '
+                  'be matched to a kept file and are not shown here; open '
+                  'the dry-run report to inspect them.',
+                  style: textTheme.bodySmall?.copyWith(
+                    color: colorScheme.error,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Expanded(
+                child: sample.shown.isEmpty
+                    ? const Center(child: Text('Nothing to review.'))
+                    : ListView.separated(
+                        itemCount: sample.shown.length,
+                        separatorBuilder: (context, index) =>
+                            const Divider(height: 24),
+                        itemBuilder: (context, index) {
+                          return _DuplicateReviewPairRow(
+                            pair: sample.shown[index],
+                          );
+                        },
+                      ),
+              ),
+              if (_hasMoreToReview) ...[
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _reviewAnotherSample,
+                  icon: const Icon(Icons.refresh),
+                  label: Text(
+                    'Review Another Sample '
+                    '(${_allPairs.length - _reviewedIndices.length} pairs '
+                    'not yet reviewed)',
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DuplicateReviewPairRow extends StatelessWidget {
+  const _DuplicateReviewPairRow({required this.pair});
+
+  final DuplicateReviewPair pair;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: _DuplicateReviewThumbnail(
+            label: 'Keep',
+            path: pair.keepPath,
+            color: colorScheme.primary,
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 32),
+          child: Icon(Icons.arrow_forward),
+        ),
+        Expanded(
+          child: _DuplicateReviewThumbnail(
+            label: 'Would trash',
+            path: pair.trashPath,
+            color: colorScheme.error,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Renders one path in the review dialog: an `Image.file` preview for
+/// still-image formats, or a file icon + filename for video/unsupported
+/// formats (no video-thumbnail-generation dependency is added for this).
+class _DuplicateReviewThumbnail extends StatelessWidget {
+  const _DuplicateReviewThumbnail({
+    required this.label,
+    required this.path,
+    required this.color,
+  });
+
+  final String label;
+  final String path;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final fileName = duplicateReviewFileName(path);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(
+            context,
+          ).textTheme.labelSmall?.copyWith(color: color),
+        ),
+        const SizedBox(height: 4),
+        AspectRatio(
+          aspectRatio: 1,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(color: color),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: isDisplayableImagePath(path)
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.file(
+                      File(path),
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          _DuplicateReviewFileFallback(fileName: fileName),
+                    ),
+                  )
+                : _DuplicateReviewFileFallback(fileName: fileName),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          fileName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
+}
+
+class _DuplicateReviewFileFallback extends StatelessWidget {
+  const _DuplicateReviewFileFallback({required this.fileName});
+
+  final String fileName;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.insert_drive_file, size: 32),
+            const SizedBox(height: 4),
+            Text(
+              fileName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

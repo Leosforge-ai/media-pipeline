@@ -29,13 +29,78 @@ flutter run -d windows
 
 ## Workflow
 
+The app has two modes for running the pipeline: a **Guided Run** that chains
+the safe steps automatically, and the original **manual, per-step** mode
+where every step is triggered by hand. Both share the same underlying step
+definitions, safety gates, and run log — Guided Run does not skip or relax
+any confirmation gate.
+
+### Manual mode
+
 1. Set `HD_PATH` and `REPORT_DIR`.
 2. Run **System Check**.
-3. Install or configure missing dependencies outside the app when needed.
-4. Run pipeline steps in order.
-5. Run duplicate cleanup dry-run and inspect the log output.
-6. If needed, run confirm cleanup via CLI after reviewing the dry-run output
-   (confirm is not yet available in the app UI).
+3. Install or configure missing dependencies outside the app when needed
+   (`setup-dependencies` and `configure-rclone` run interactive/`sudo`
+   prompts and are always manual-only, even under Guided Run).
+4. Run pipeline steps in order, one at a time.
+5. Run duplicate cleanup dry-run (**Review Duplicate Move Plan**) and inspect
+   the log output.
+6. Open the **duplicate thumbnail review** (see below) — it must be
+   acknowledged before the confirm step unlocks.
+7. Run **Move Duplicates To Trash** (`06_delete_duplicates.sh --confirm`)
+   from the app when you're ready. This is a real, working confirm button in
+   the app UI, not CLI-only — it stays locked until both the dry-run has
+   succeeded in the current app session and the thumbnail review has been
+   acknowledged for that dry-run's output.
+
+### Guided Run
+
+Guided Run chains the safe, non-interactive steps of a full "clean and
+import" pass automatically instead of requiring separate manual triggers for
+each one: system check → stitch metadata → scan duplicates → duplicate
+dry-run → verify cleanup → sync to the Immich library. It runs one segment
+at a time and stops immediately if any step fails.
+
+Guided Run always stops and waits for you at two checkpoints, each requiring
+the same explicit action as manual mode:
+
+1. **Before the delete-confirm step.** After the duplicate dry-run finishes,
+   Guided Run pauses. Review the dry-run output and the thumbnail-diff
+   dialog, then trigger **Move Duplicates To Trash** yourself — Guided Run
+   never runs a confirm-gated step automatically; attempting to include one
+   in the automatic chain is a hard error the app is tested against.
+2. **Before the Immich rescan implied by syncing.** After copying the
+   cleaned staging files into `immich_library`, Guided Run pauses so you can
+   restart Immich / trigger a rescan on your own terms before continuing.
+
+Interactive or privileged one-time setup steps (`setup-dependencies`,
+`configure-rclone`, `setup-immich`, `verify-immich`, and the Immich Takeout
+duplicate dry-run) are never part of the automatic Guided Run chain — they
+stay in the manual per-step list, same as before Guided Run existed.
+
+### Duplicate thumbnail review
+
+Before **Move Duplicates To Trash** becomes available (in both manual mode
+and Guided Run), the app shows a **Review Duplicate Move Plan** dialog: a
+side-by-side thumbnail comparison of every proposed keep/trash pair from the
+dry-run output, instead of asking you to trust raw Czkawka report text.
+
+- It reads back only the exact `Keep: ...` / `Would trash: ...` lines that
+  `06_delete_duplicates.sh` itself already prints during a dry-run — never
+  the raw Czkawka report files, and never re-deriving which file would be
+  kept.
+- Large duplicate sets are sampled to at most 20 pairs (a fixed, reproducible
+  sample). The dialog always shows an honest count, e.g. "Showing 20 of 137
+  pairs — full list in the dry-run report," so nothing is silently hidden.
+- Still images render inline; videos and unsupported formats show a file
+  icon and filename instead.
+- Opening the review marks it acknowledged for the dry-run output that
+  produced it. Re-running the dry-run (manually or via Guided Run) resets
+  the acknowledgment, since a new dry-run can find a different duplicate
+  set — you must review again before confirming.
+- This is an **additional** gate on top of the existing dry-run requirement,
+  never a replacement for it: `06_delete_duplicates.sh`'s own Czkawka-report
+  parsing is unchanged.
 
 ## Help Section
 
