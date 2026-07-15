@@ -1482,3 +1482,79 @@ Part of #76 (tracking issue — stays open); this is Phase 3 of that issue's roa
 whole issue. Flagging **Cody + Astrid** review as required — this changes how every
 container-routed tool invocation runs (`docker run`'s own argument list), a cross-cutting change
 underneath all four already-reviewed consumer migrations.
+
+## Phase 25 — `PipelineRunner`/`PipelineStep` Dart-action execution plumbing, no step migrated (2026-07-15)
+
+**Context:** Phase 0 (Dart ports of `drive_detection`/`delete_duplicates`/`clean_takeout_duplicates`/
+`dedupe_live_photos`/`stitch_metadata`/`restore_from_trash`) and Phase 2 (wiring those ports'
+external-tool calls to `ToolsContainer`, PRs #93-96) are done, but `pipeline_models.dart`'s
+`buildPipelineSteps()` still routes every single step through `PipelineCommand('bash'|'python3',
+[...])` — the ported Dart logic is fully tested but has no way to actually run as a live pipeline
+step. This phase builds the plumbing that will let a later PR swap one step at a time from a
+subprocess to a direct Dart call, without touching which steps currently run Bash/Python.
+
+**Design — exactly one execution mechanism per step, enforced by a constructor assert:**
+`PipelineStep.command` (`lib/src/pipeline_models.dart`) changed from `required` to an optional
+`PipelineCommand?`, joined by a new optional `PipelineDartAction? dartAction` field — a typedef
+`Future<PipelineRunResult> Function(PipelineSettings settings, LogSink? onLog)`. The constructor
+asserts `(command == null) != (dartAction == null)`, so a step must set exactly one; asserts run
+in every debug/test build (this repo's whole test suite runs under `flutter test`, which keeps
+asserts enabled), and `PipelineRunner.run()` also throws a `StateError` if it's ever handed a step
+with neither set, so the invariant fails loudly even if asserts were ever compiled out. A sealed
+class per execution kind was considered and rejected — it would have forced every existing
+`PipelineStep(...)` call site in `buildPipelineSteps()` (12 steps, all `command`-based) to change
+shape for no behavioral gain over a two-nullable-fields-plus-assert, which is this codebase's
+existing idiom for "at most one of N related fields" (see `requiresDryRunStepId`'s already-nullable
+pattern one field over).
+
+**`LogSink` moved to `pipeline_models.dart`, re-exported from `pipeline_runner.dart`:** the
+`PipelineDartAction` typedef needs the same callback shape `PipelineRunner.run()`'s `onLog`
+parameter already used, but `LogSink` previously lived in `pipeline_runner.dart`, which imports
+`pipeline_models.dart` — moving it the other direction would have created a cycle. Moved the
+typedef itself to `pipeline_models.dart` and added `export 'pipeline_models.dart' show LogSink;`
+to `pipeline_runner.dart`, so every existing `import 'package:media_pipeline_app/src/
+pipeline_runner.dart'` call site (test files included) keeps resolving `LogSink` with zero changes.
+
+**`PipelineRunner.run()` branches, subprocess path byte-for-byte unchanged:** if
+`step.dartAction` is set, it's called directly — in-process, no `Process.start`, given the same
+`onLog` callback a subprocess step would get — and its returned `PipelineRunResult` is passed
+through unmodified. If `step.command` is set, the existing `Process.start`/stdout-stderr-split/
+`stdoutOutput` capture logic (issue #54) is untouched, just reading from a local `command` binding
+instead of `step.command` directly (needed once the field became nullable). Either path produces
+the identical `PipelineRunResult` shape, so `GuidedRunController` and the app's step-run UI (which
+only ever call `runner.run(...)` and read the result) need zero changes — verified by a new test
+group chaining a mix of `command`-backed and `dartAction`-backed steps through the same
+`GuidedRunController.run()` call and asserting identical start/complete/log/short-circuit behavior.
+
+**Cancellation — investigated, none exists today, so none was added for Dart actions either.**
+Searched `media_pipeline_app.dart` for any `Process.kill()`/step-abort path reachable from the UI:
+none exists — the one visible "Cancel" button (`_MemoryWriteApprovalDialog`, an unrelated
+memory-write-approval dialog) just closes a `Navigator` route, and `GuidedRunController.run()`'s
+`shouldAbort` callback only gates *between* steps in the automatic chain, never kills a step
+already spawned. Since subprocess steps have no live-cancellation parity to match, a Dart action
+gets none either — adding one now would be scope beyond what this plumbing PR needs, per the task
+brief's explicit instruction not to invent cancellation beyond what parity requires.
+
+**Confirm-gate/dry-run invariants — no new bypass surface.** `PipelineStep`'s constructor doesn't
+loosen `risk`/`requiresDryRunStepId`/`requiresDuplicateThumbnailReview` in any way — a future
+`dartAction`-backed `delete-confirm`/`restore-confirm` step would still need to go through
+`canRunStep()`'s existing dry-run/thumbnail-review gate exactly like a `command`-backed one, since
+that gate is evaluated by the caller (`media_pipeline_app.dart`) before `runner.run()` is ever
+invoked, independent of which execution mechanism the step uses. Nothing in this PR gives a Dart
+action a way to run without going through that same caller-side gate.
+
+**Not done here (intentionally):** `buildPipelineSteps()` is byte-for-byte unchanged — every step
+still uses `command`; no script gets replaced by a Dart call in this PR. That migration (one step
+at a time, per Astrid's standing risk list from Phase 20) is later work.
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green (358 tests, up
+from 350 before this PR — 8 new tests in `test/pipeline_runner_test.dart`'s new "PipelineStep.dartAction
+plumbing" group: 2 constructor-assert tests, 4 `PipelineRunner.run()` tests against a synthetic
+dartAction — success/failure/uncaught-throw/settings-passthrough — and 2 `GuidedRunController`
+tests — a mixed command+dartAction chain, and a dartAction failure short-circuiting the chain).
+
+**Outcome:** `PipelineStep`/`PipelineRunner` now have a proven, tested second execution path with
+identical external behavior to the existing subprocess path, ready for a future PR to migrate one
+real step onto. Part of #76 (tracking issue — see roadmap, stays open), not the whole issue.
+Flagging **Cody + Astrid** review as required, per this series' established practice — this
+touches the shared execution path every future step migration will build on.

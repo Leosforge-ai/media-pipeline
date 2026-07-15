@@ -51,24 +51,60 @@ class PipelineCommand {
   final String? stdinText;
 }
 
+/// A chunk of live log output from a running step — fired for every piece
+/// of output a step produces, whether it comes from a subprocess's
+/// stdout/stderr (see [PipelineRunner.run]'s existing `Process.start` path)
+/// or from a Dart-native [PipelineDartAction] calling it directly. Callers
+/// (e.g. the step-log UI) see identical behavior either way.
+typedef LogSink = void Function(String chunk);
+
+/// A Dart-native, in-process step action: an alternative to
+/// [PipelineStep.command] that runs without spawning a subprocess (e.g. by
+/// calling into `ToolsContainer` directly) but must still honor the exact
+/// same external contract [PipelineRunner.run] guarantees for a
+/// subprocess-backed step — same [PipelineRunResult] shape, same live
+/// `onLog` streaming semantics, no way to bypass the confirm-gate/dry-run
+/// invariants that today only exist because a human supplies `--confirm`
+/// as an explicit extra argument to a real subprocess.
+///
+/// See [PipelineStep.dartAction] and `PipelineRunner.run` in
+/// `pipeline_runner.dart` for how this is invoked.
+typedef PipelineDartAction =
+    Future<PipelineRunResult> Function(PipelineSettings settings, LogSink? onLog);
+
 class PipelineStep {
   const PipelineStep({
     required this.id,
     required this.title,
     required this.description,
     required this.risk,
-    required this.command,
+    this.command,
+    this.dartAction,
     this.requiredTools = const [],
     this.requiresDryRunStepId,
     this.linuxOnly = false,
     this.requiresDuplicateThumbnailReview = false,
-  });
+  }) : assert(
+         (command == null) != (dartAction == null),
+         'PipelineStep must set exactly one of `command` or `dartAction`, never both/neither.',
+       );
 
   final String id;
   final String title;
   final String description;
   final PipelineRisk risk;
-  final PipelineCommand command;
+
+  /// The subprocess this step runs, via `Process.start` — see
+  /// `PipelineRunner.run`. Mutually exclusive with [dartAction]: a step has
+  /// exactly one execution mechanism, enforced by this class's constructor
+  /// assert. Every step in [buildPipelineSteps] currently uses this field;
+  /// no step uses [dartAction] yet (see issue #76's roadmap — this is
+  /// plumbing-only, real step migrations are later PRs).
+  final PipelineCommand? command;
+
+  /// A Dart-native, in-process alternative to [command] — see
+  /// [PipelineDartAction]'s doc comment. Mutually exclusive with [command].
+  final PipelineDartAction? dartAction;
   final List<String> requiredTools;
   final String? requiresDryRunStepId;
   final bool linuxOnly;

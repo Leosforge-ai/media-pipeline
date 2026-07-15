@@ -348,4 +348,261 @@ echo "err line" >&2
       expect(touchedConfirmIds, isEmpty);
     });
   });
+
+  group('PipelineStep.dartAction plumbing (issue #76)', () {
+    // Synthetic Dart-native steps only — no real step is migrated by this
+    // PR (`buildPipelineSteps()` is unchanged). This proves the new
+    // execution path in isolation: `PipelineRunner.run()` must call a
+    // `dartAction` directly (no subprocess spawned) and return a
+    // `PipelineRunResult` indistinguishable in shape from a subprocess run,
+    // and `GuidedRunController` must chain/log/short-circuit on it exactly
+    // like it does for a `command`-backed step.
+
+    test(
+      'PipelineStep constructor rejects both command and dartAction set',
+      () {
+        expect(
+          () => PipelineStep(
+            id: 'both',
+            title: 'both',
+            description: 'both',
+            risk: PipelineRisk.safe,
+            command: const PipelineCommand('bash', ['-c', 'exit 0']),
+            dartAction: (settings, onLog) async =>
+                const PipelineRunResult(exitCode: 0, output: '', stdoutOutput: ''),
+          ),
+          throwsA(isA<AssertionError>()),
+        );
+      },
+    );
+
+    test(
+      'PipelineStep constructor rejects neither command nor dartAction set',
+      () {
+        expect(
+          () => PipelineStep(
+            id: 'neither',
+            title: 'neither',
+            description: 'neither',
+            risk: PipelineRisk.safe,
+          ),
+          throwsA(isA<AssertionError>()),
+        );
+      },
+    );
+
+    test(
+      'runner calls a successful dartAction directly and returns its result '
+      'unchanged, with no subprocess involved',
+      () async {
+        final runner = PipelineRunner(workingDirectory: Directory.systemTemp.path);
+        var callCount = 0;
+        final step = PipelineStep(
+          id: 'dart-success',
+          title: 'dart success',
+          description: 'dart success',
+          risk: PipelineRisk.safe,
+          dartAction: (settings, onLog) async {
+            callCount += 1;
+            onLog?.call('dart action ran\n');
+            return const PipelineRunResult(
+              exitCode: 0,
+              output: 'dart action ran\n',
+              stdoutOutput: 'dart action ran\n',
+            );
+          },
+        );
+
+        final loggedChunks = <String>[];
+        final result = await runner.run(
+          step,
+          const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+          onLog: loggedChunks.add,
+        );
+
+        expect(callCount, 1);
+        expect(result.succeeded, isTrue);
+        expect(result.exitCode, 0);
+        expect(result.output, 'dart action ran\n');
+        expect(result.stdoutOutput, 'dart action ran\n');
+        expect(loggedChunks, ['dart action ran\n']);
+      },
+    );
+
+    test(
+      'runner surfaces a non-zero exit code from a failing dartAction, same '
+      'shape a failed subprocess would return',
+      () async {
+        final runner = PipelineRunner(workingDirectory: Directory.systemTemp.path);
+        final step = PipelineStep(
+          id: 'dart-fail',
+          title: 'dart fail',
+          description: 'dart fail',
+          risk: PipelineRisk.safe,
+          dartAction: (settings, onLog) async {
+            onLog?.call('about to fail\n');
+            return const PipelineRunResult(
+              exitCode: 3,
+              output: 'about to fail\n',
+              stdoutOutput: '',
+            );
+          },
+        );
+
+        final result = await runner.run(
+          step,
+          const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+        );
+
+        expect(result.succeeded, isFalse);
+        expect(result.exitCode, 3);
+      },
+    );
+
+    test(
+      'runner propagates an uncaught throw from a dartAction rather than '
+      'swallowing it into a fake success/failure result',
+      () async {
+        final runner = PipelineRunner(workingDirectory: Directory.systemTemp.path);
+        final step = PipelineStep(
+          id: 'dart-throw',
+          title: 'dart throw',
+          description: 'dart throw',
+          risk: PipelineRisk.safe,
+          dartAction: (settings, onLog) async {
+            throw StateError('synthetic dart action failure');
+          },
+        );
+
+        expect(
+          () => runner.run(
+            step,
+            const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+          ),
+          throwsA(isA<StateError>()),
+        );
+      },
+    );
+
+    test(
+      'dartAction receives the same PipelineSettings the runner was called '
+      'with',
+      () async {
+        final runner = PipelineRunner(workingDirectory: Directory.systemTemp.path);
+        PipelineSettings? seenSettings;
+        final step = PipelineStep(
+          id: 'dart-settings',
+          title: 'dart settings',
+          description: 'dart settings',
+          risk: PipelineRisk.safe,
+          dartAction: (settings, onLog) async {
+            seenSettings = settings;
+            return const PipelineRunResult(exitCode: 0, output: '', stdoutOutput: '');
+          },
+        );
+
+        const settings = PipelineSettings(hdPath: '/mnt/x', reportDir: '/tmp/reports');
+        await runner.run(step, settings);
+
+        expect(seenSettings, same(settings));
+      },
+    );
+
+    group('GuidedRunController with a Dart-action step', () {
+      late PipelineRunner runner;
+      late GuidedRunController controller;
+
+      setUp(() {
+        runner = PipelineRunner(workingDirectory: Directory.systemTemp.path);
+        controller = GuidedRunController(runner: runner);
+      });
+
+      PipelineStep dartStep(
+        String id, {
+        int exitCode = 0,
+        String logChunk = 'ok\n',
+      }) {
+        return PipelineStep(
+          id: id,
+          title: id,
+          description: id,
+          risk: PipelineRisk.safe,
+          dartAction: (settings, onLog) async {
+            onLog?.call(logChunk);
+            return PipelineRunResult(
+              exitCode: exitCode,
+              output: logChunk,
+              stdoutOutput: logChunk,
+            );
+          },
+        );
+      }
+
+      test(
+        'chains a mix of command-backed and dartAction-backed steps '
+        'identically',
+        () async {
+          final steps = [
+            PipelineStep(
+              id: 'cmd-one',
+              title: 'cmd-one',
+              description: 'cmd-one',
+              risk: PipelineRisk.safe,
+              command: const PipelineCommand('bash', ['-c', 'exit 0']),
+            ),
+            dartStep('dart-two'),
+            PipelineStep(
+              id: 'cmd-three',
+              title: 'cmd-three',
+              description: 'cmd-three',
+              risk: PipelineRisk.safe,
+              command: const PipelineCommand('bash', ['-c', 'exit 0']),
+            ),
+          ];
+          final started = <String>[];
+          final completed = <String>[];
+          final loggedChunks = <String>[];
+
+          final result = await controller.run(
+            steps: steps,
+            settings: const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+            onStepStart: (step) => started.add(step.id),
+            onStepComplete: (step, stepResult) => completed.add(step.id),
+            onLog: loggedChunks.add,
+          );
+
+          expect(result.outcome, GuidedRunOutcome.completed);
+          expect(result.completedStepIds, ['cmd-one', 'dart-two', 'cmd-three']);
+          expect(started, ['cmd-one', 'dart-two', 'cmd-three']);
+          expect(completed, ['cmd-one', 'dart-two', 'cmd-three']);
+          expect(loggedChunks, contains('ok\n'));
+        },
+      );
+
+      test(
+        'stops the chain when a dartAction step fails, never running the '
+        'step after it',
+        () async {
+          final steps = [
+            dartStep('dart-one'),
+            dartStep('dart-fails', exitCode: 5, logChunk: 'boom\n'),
+            dartStep('dart-never-runs'),
+          ];
+          final started = <String>[];
+
+          final result = await controller.run(
+            steps: steps,
+            settings: const PipelineSettings(hdPath: '/tmp', reportDir: '/tmp'),
+            onStepStart: (step) => started.add(step.id),
+          );
+
+          expect(result.outcome, GuidedRunOutcome.stepFailed);
+          expect(result.failedStepId, 'dart-fails');
+          expect(result.failedExitCode, 5);
+          expect(result.completedStepIds, ['dart-one']);
+          expect(started, ['dart-one', 'dart-fails']);
+        },
+      );
+    });
+  });
 }

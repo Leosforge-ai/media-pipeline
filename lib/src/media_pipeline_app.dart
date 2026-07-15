@@ -2449,7 +2449,14 @@ String _buttonLabel(PipelineStep step) {
 }
 
 String _commandLabel(PipelineStep step) {
-  return ([step.command.executable, ...step.command.arguments]).join(' ');
+  final command = step.command;
+  if (command == null) {
+    // Dart-native step (see `PipelineStep.dartAction`, issue #76 plumbing)
+    // — no subprocess command line to show. No real step uses this path
+    // yet, but the UI must not crash once one does.
+    return '(runs in-process)';
+  }
+  return ([command.executable, ...command.arguments]).join(' ');
 }
 
 String _newChecklistId() {

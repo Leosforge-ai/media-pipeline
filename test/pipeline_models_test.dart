@@ -8,7 +8,7 @@ void main() {
       (step) => step.id == 'delete-confirm',
     );
 
-    expect(step.command.arguments, contains('--confirm'));
+    expect(step.command!.arguments, contains('--confirm'));
     expect(step.requiresDryRunStepId, 'delete-dry-run');
     expect(step.risk, PipelineRisk.confirmRequired);
   });
@@ -18,7 +18,7 @@ void main() {
       (step) => step.id == 'delete-dry-run',
     );
 
-    expect(step.command.arguments, isNot(contains('--confirm')));
+    expect(step.command!.arguments, isNot(contains('--confirm')));
     expect(step.risk, PipelineRisk.safe);
   });
 
@@ -156,10 +156,10 @@ void main() {
       (step) => step.id == 'immich-takeout-duplicate-dry-run',
     );
 
-    expect(step.command.arguments, [
+    expect(step.command!.arguments, [
       'scripts/12_clean_immich_takeout_duplicates.sh',
     ]);
-    expect(step.command.arguments, isNot(contains('--confirm')));
+    expect(step.command!.arguments, isNot(contains('--confirm')));
     expect(step.risk, PipelineRisk.safe);
     expect(step.linuxOnly, isTrue);
     expect(step.requiredTools, contains('sha256sum'));
