@@ -18,6 +18,7 @@ for both architectures, and the tools actually run inside it.
 | `ffmpeg` / `ffprobe` | 5.1.9 (Debian package `ffmpeg=7:5.1.9-0+deb12u1`) | apt, pinned exact version |
 | `rclone` | v1.74.4 | upstream release binary, checksum-verified |
 | `czkawka_cli` | 12.0.0 | upstream GitHub release binary, checksum-verified |
+| `sha256sum` (GNU coreutils) | 9.1 (Debian package `coreutils=9.1-1`) | transitive — see below |
 
 Base image: `debian:bookworm-slim`, pinned by digest (see the `FROM` line in `Dockerfile`).
 Debian 12 (bookworm) is a minimal, long-term-supported base (security support into ~2028),
@@ -43,6 +44,45 @@ Debian host.
 - **`exiftool`** and **`ffmpeg`**: same apt package family as the host script; pinned to the
   exact package version present in the `debian:bookworm-slim` snapshot pinned in the `Dockerfile`,
   so a Debian point release doesn't silently swap versions on you.
+
+### GNU coreutils / `sha256sum` — provenance and pinning (transitive, not explicit)
+
+`lib/src/clean_takeout_duplicates.dart`'s `TakeoutDuplicateCleaner` uses this image's
+`sha256sum` (via `containerFileHasher`, part of #76 Phase 2 container wiring) for its
+three-way basename+size+SHA-256 duplicate verification. Unlike the four tools in the table
+above, `sha256sum` is **not** explicitly `apt-get install`ed anywhere in `Dockerfile` — it
+ships as part of **GNU coreutils**, which Debian marks `Essential: yes`, meaning it is
+present in literally every Debian/`bookworm-slim` image, this one included, without any
+install line at all. This was flagged as an undocumented gap in Astrid's review of PR #93
+(the `ToolsContainer` plumbing PR): `sha256sum` was known to work, but — unlike `exiftool`/
+`ffmpeg`/`rclone`/`czkawka_cli` — its provenance and version were never written down anywhere.
+
+**Verified version, at the `FROM` line's currently-pinned digest**
+(`debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818`):
+
+```
+$ docker run --rm media-pipeline-tools:local bash -c "sha256sum --version | head -1; dpkg -s coreutils | grep Version"
+sha256sum (GNU coreutils) 9.1
+Version: 9.1-1
+```
+
+**Why this is still considered "pinned" despite no explicit `ARG`/version line in the
+`Dockerfile`:** the `FROM debian:bookworm-slim@sha256:...` line pins the entire base image
+by content digest, and coreutils is bundled inside that same digest-pinned image — so the
+coreutils (and therefore `sha256sum`) version is exactly as reproducible, build-to-build, as
+`exiftool`'s or `ffmpeg`'s explicit `ARG` pins are. The *only* difference is that this
+document is the sole place recording what that transitively-pinned version currently
+resolves to; the `Dockerfile` itself carries a short inline comment (next to the other `ARG`
+pins) pointing here, but deliberately does not add an `apt-get install coreutils=...` line —
+see that comment for why (an `Essential: yes` package can't be absent from any
+`debian:bookworm-slim` image, so an explicit install/pin line would add ceremony without
+adding any actual reproducibility the digest pin doesn't already provide).
+
+**How to verify/re-check after a base-image bump:** re-run the `docker run` one-liner above
+against the freshly built image (after bumping the `FROM` digest — see "Bumping a pinned tool
+version" below) and update the version numbers in the table and this section if they changed.
+Unlike `czkawka_cli`, this needs no separate checksum step — `apt`'s own package integrity
+checking already covers it, exactly as it does for `exiftool`/`ffmpeg`.
 
 ## Building locally
 
@@ -124,9 +164,17 @@ Mirrors the version-bump discipline in `.github/workflows/gitleaks.yml`'s inline
    `sha256sum` on each yourself (czkawka does not publish a checksums file — this is a
    trust-on-first-use pin, so download over HTTPS from the official repo only), and update
    `CZKAWKA_VERSION`, `CZKAWKA_SHA256_AMD64`, `CZKAWKA_SHA256_ARM64` in the `Dockerfile`.
-4. Rebuild both platforms locally (see above), re-run the version checks and a synthetic
+4. **`sha256sum` / GNU coreutils** (transitive, via the base image — see "GNU coreutils /
+   `sha256sum`" above): whenever step 1 re-pins the `FROM debian:bookworm-slim@sha256:...`
+   digest, re-run `docker run --rm media-pipeline-tools:local bash -c "sha256sum --version |
+   head -1; dpkg -s coreutils | grep Version"` against the rebuilt image and update the
+   version numbers in the table and that section if they changed. No separate `Dockerfile`
+   change is needed (there is no explicit coreutils pin to update) — this step is purely
+   about keeping this document's recorded version accurate, not about changing pinning
+   behavior.
+5. Rebuild both platforms locally (see above), re-run the version checks and a synthetic
    `czkawka_cli dup` scan (see "Debugging" above) before merging — a checksum mismatch fails
    the build loudly (`sha256sum -c -` exits non-zero), but a *wrong* pinned checksum copied from
    the wrong asset would not be caught by the build itself.
-5. Update this table and the "Deviations" section above if the new version changes the
+6. Update this table and the "Deviations" section above if the new version changes the
    deviation rationale.

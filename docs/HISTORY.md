@@ -1318,3 +1318,76 @@ two-mechanism path-safety composition this migration was expected to get right. 
 into `pipeline_models.dart`/`media_pipeline_app.dart` — that remains later work. Part of #76, not
 closing it. Flagging **Cody + Astrid** review as required — hardest migration in the series so
 far, touches untrusted archive input, and composes two separate path-safety mechanisms.
+
+## Phase 23 — Fourth consumer migration: clean-takeout-duplicates routes `sha256sum` through `ToolsContainer` (2026-07-15)
+
+**Context:** Following Phase 22's three-tool `stitch_metadata.dart` migration, `lib/src/clean_takeout_duplicates.dart`
+(Phase 0b port, PR #87) is the fourth #76 Phase 2 consumer migration and, as anticipated in this
+migration's task brief, the simplest one yet: a single tool (`sha256sum`), invoked once per file,
+producing one parseable hex string on stdout with no filesystem side effects — structurally
+closer to Phase 21's `ffprobe` migration than to Phase 22's archive-extraction one.
+
+**Decisions:**
+- **`sha256sum` routes through the container.** `containerFileHasher({required ToolsContainer
+  container})` translates the host file path via `ToolsContainer.hostToContainerPath` before every
+  `container.exec(['sha256sum', ...])` call, mirroring `containerFfprobeDurationReader`'s shape
+  exactly. Throws `FileSystemException` on a non-zero exit — a hashing failure is always a loud
+  error, never a silent "not a duplicate" verdict.
+- **Hard cutover, matching the established precedent.** `TakeoutDuplicateCleaner.hasher` is now a
+  *required* constructor parameter — no implicit default that silently shells out to a
+  host-installed `sha256sum`. Same rationale as the prior three migrations: this repo's target
+  users already require Docker for Immich, so a "just in case" host fallback would only invite an
+  accidental bypass of the container path (and its path-translation safety net) by omission.
+  `verifyTakeoutDuplicateCandidate`'s own `hasher` parameter (the pure three-way decision function)
+  is unchanged — every existing unit test already injects its own synthetic lambda there, and the
+  verification *logic* itself was explicitly out of scope for this migration.
+- **Parity test decoupling transferred even more cleanly than predicted.** Unlike the `ffprobe`
+  migration (which needed a Dart-native marker-file fake because part of its decision logic — the
+  numeric-duration regex, the duration-then-timestamp priority order — lives in how the raw stdout
+  gets *parsed*), the Bash-vs-Dart parity test here needed no fake substitution at all:
+  `sha256sum`'s only job is producing a real content hash of real bytes, and `defaultFileHasher`
+  (host `Process.run` against a real `sha256sum` binary — the same real binary the Bash script
+  itself shells out to) already does exactly that. Passing `hasher: defaultFileHasher` into the
+  parity test's `TakeoutDuplicateCleaner` keeps the test decoupled from the "where does sha256sum
+  run" question (no Docker needed to run the comparison) while still exercising a genuine SHA-256
+  computation — including the adversarial hash-mismatch-despite-matching-size fixture that proves
+  the three-way check isn't weakened to size-only, which continues to pass unmodified in spirit.
+- **`sha256sum`'s provenance in the pinned image, made explicit.** Astrid's PR #93 review flagged
+  that unlike `exiftool`/`ffmpeg`/`rclone`/`czkawka_cli`, `sha256sum` is present in
+  `docker/tools/Dockerfile`'s image only as an undocumented transitive dependency of the
+  `debian:bookworm-slim` base image (GNU coreutils). Verified the actual resolved version against
+  the currently-pinned base image digest: `sha256sum (GNU coreutils) 9.1` / Debian package
+  `coreutils=9.1-1`. `docker/tools/README.md` gains a new table row, a "GNU coreutils / `sha256sum`"
+  section documenting that provenance and how to re-verify/bump it, and a new step in "Bumping a
+  pinned tool version". `Dockerfile` itself gains a short inline comment next to the other `ARG`
+  pins explaining why no explicit `apt-get install coreutils=...` line was added: coreutils is
+  `Essential: yes` in Debian and therefore cannot be absent from *any* `debian:bookworm-slim`
+  image — an explicit pin would be pinning theater, not a real reproducibility improvement, since
+  the `FROM ...@sha256:...` digest pin already fixes its version exactly as effectively as an
+  explicit `ARG` would for the other four tools.
+- **Real end-to-end coverage.** A new Docker-gated "sha256sum via a real ToolsContainer" group
+  starts a real `ToolsContainer` and: (1) hashes a real fixture file through the full path — host
+  path -> container path translation -> real `sha256sum` exec inside the pinned image — and
+  cross-checks the result against an independently-computed host-side `defaultFileHasher` call on
+  the same bytes; (2) confirms a missing path throws `FileSystemException` rather than returning a
+  bogus hash; (3) runs `TakeoutDuplicateCleaner` end-to-end with `containerFileHasher` wired in
+  against a genuine matching-basename+size+hash fixture, confirming the full `wouldMove` decision
+  path works through a real container exec, not just a mocked one.
+
+**Pivots:** None. The migration matched its task brief's own prediction exactly — no marker-file
+fake was needed, no UID-mismatch workaround was needed for the read-only hashing path (the write-only
+UID-mismatch issue from Phases 21/22 only applies to files the *container* writes; here the
+container only ever reads host-written fixture files, though the new container tests still
+`chmod 0666`/`0777` their fixtures defensively, matching this series' established pattern, since
+the fixed non-root container UID still needs read access to files the host test process wrote).
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green (343 tests, up
+from 339 before this PR), including the new real-container tests, which actually ran (Docker +
+`media-pipeline-tools:local` were available in this environment) rather than skipping.
+
+**Outcome:** `clean_takeout_duplicates.dart` now has a sanctioned, container-routed production
+path for its one external tool, proven against a real Docker daemon end-to-end, and
+`sha256sum`'s previously-undocumented provenance in the pinned image is now explicit. Still not
+wired into `pipeline_models.dart`/`media_pipeline_app.dart` — that remains later work. Part of
+#76, not closing it. Flagging **Cody + Astrid** review as required, per this series' established
+practice.
