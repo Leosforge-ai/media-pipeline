@@ -4,18 +4,53 @@ import 'dart:io';
 
 import 'pipeline_models.dart';
 
-typedef LogSink = void Function(String chunk);
+export 'pipeline_models.dart' show LogSink;
 
 class PipelineRunner {
   const PipelineRunner({required this.workingDirectory});
 
   final String workingDirectory;
 
+  /// Runs [step] and returns its [PipelineRunResult].
+  ///
+  /// Branches on which of [PipelineStep.dartAction]/[PipelineStep.command]
+  /// is set (the constructor assert on [PipelineStep] guarantees exactly
+  /// one is) — see issue #76's plumbing PR:
+  ///
+  /// - [PipelineStep.dartAction] set: calls it directly, in-process, no
+  ///   subprocess spawned. The action receives the same [onLog] callback a
+  ///   subprocess step would, and must itself return a [PipelineRunResult]
+  ///   with the same shape a subprocess run would produce.
+  /// - [PipelineStep.command] set: unchanged from before this PR — spawns a
+  ///   real subprocess via `Process.start` and captures its output exactly
+  ///   as it always has.
+  ///
+  /// Every existing caller (`GuidedRunController`, the app's step-run UI)
+  /// keeps working with zero changes either way — the returned
+  /// [PipelineRunResult] shape and the live `onLog` streaming behavior are
+  /// identical from the outside.
   Future<PipelineRunResult> run(
     PipelineStep step,
     PipelineSettings settings, {
     LogSink? onLog,
   }) async {
+    final dartAction = step.dartAction;
+    if (dartAction != null) {
+      return dartAction(settings, onLog);
+    }
+
+    final command = step.command;
+    if (command == null) {
+      // Unreachable in practice: `PipelineStep`'s constructor assert
+      // guarantees exactly one of `command`/`dartAction` is set. Fails
+      // loudly rather than silently doing nothing if that invariant is
+      // ever violated (e.g. asserts disabled in a release build).
+      throw StateError(
+        'PipelineStep "${step.id}" has neither `command` nor `dartAction` '
+        'to run.',
+      );
+    }
+
     // `output` is the combined, live-interleaved stdout+stderr buffer that
     // feeds the step-log UI (`StepRunState.log`) — its ordering/behavior is
     // unchanged from before issue #54: both streams are still captured via
@@ -31,8 +66,8 @@ class PipelineRunner {
     final output = StringBuffer();
     final stdoutOutput = StringBuffer();
     final process = await Process.start(
-      step.command.executable,
-      step.command.arguments,
+      command.executable,
+      command.arguments,
       workingDirectory: workingDirectory,
       environment: settings.toEnvironment(),
       runInShell: Platform.isWindows,
@@ -54,7 +89,7 @@ class PipelineRunner {
       process.stderr.transform(utf8.decoder).listen(captureStderr),
     ];
 
-    final stdinText = step.command.stdinText;
+    final stdinText = command.stdinText;
     if (stdinText != null) {
       process.stdin.write(stdinText);
       await process.stdin.flush();
