@@ -256,10 +256,7 @@ List<PipelineStep> buildPipelineSteps() {
       description:
           'Confirm duplicate cleanup and move selected files to media_trash.',
       risk: PipelineRisk.confirmRequired,
-      command: PipelineCommand('bash', [
-        'scripts/06_delete_duplicates.sh',
-        '--confirm',
-      ]),
+      dartAction: runDeleteConfirmStep,
       requiresDryRunStepId: 'delete-dry-run',
       requiresDuplicateThumbnailReview: true,
     ),
@@ -324,10 +321,7 @@ List<PipelineStep> buildPipelineSteps() {
       description:
           'Confirm restore from media_trash back to original locations.',
       risk: PipelineRisk.confirmRequired,
-      command: PipelineCommand('bash', [
-        'scripts/11_restore_from_trash.sh',
-        '--confirm',
-      ]),
+      dartAction: runRestoreConfirmStep,
       requiresDryRunStepId: 'restore-dry-run',
     ),
   ];
@@ -426,13 +420,68 @@ List<List<String>> buildGuidedRunSegments() {
 // already-container-routed Dart modules (`delete_duplicates.dart`,
 // `restore_from_trash.dart`, `clean_takeout_duplicates.dart`,
 // `stitch_metadata.dart`) into real [PipelineStep]s via
-// [PipelineStep.dartAction], for the four SAFE/dry-run-or-non-destructive
-// steps in scope for this migration. `delete-confirm`/`restore-confirm`
-// (`PipelineRisk.confirmRequired`) are deliberately left on `command` —
-// out of scope, deferred to a dedicated future PR with extra review.
+// [PipelineStep.dartAction]. This now covers all six non-setup/non-scan
+// steps that have a Dart port: the four SAFE/dry-run-or-non-destructive
+// steps from the prior PR in this sequence, plus `delete-confirm`/
+// `restore-confirm` (`PipelineRisk.confirmRequired`) — the pipeline's two
+// most destructive, irreversible-feeling actions — wired by this PR.
 // `scan-duplicates` (`05_cleanup_scan.sh`) has no Dart port at all (only
-// `06`'s report-parsing/dry-run logic was ported, not `05`'s own Czkawka
-// scan invocation) and is likewise left on `command`.
+// `06`'s report-parsing/dry-run/confirm logic was ported, not `05`'s own
+// Czkawka scan invocation) and is likewise left on `command`.
+//
+// ## `delete-confirm`/`restore-confirm` — confirm-gate is untouched
+//
+// Wiring these two steps to `dartAction` changes nothing about how or when
+// they may run. `canRunStep()` in `pipeline_runner.dart` (not touched by
+// this PR) gates on `requiresDryRunStepId`/`requiresDuplicateThumbnailReview`
+// /platform support, structurally independent of whether a step's execution
+// mechanism is `command` or `dartAction` — it only ever inspects `states`/
+// `duplicateThumbnailReviewAcknowledged`, never `step.command`/
+// `step.dartAction`. The gate check itself happens caller-side, in
+// `media_pipeline_app.dart`'s `_runSelectedStep`, *before* `runner.run()` is
+// ever invoked — exactly as it did before this PR for the Bash `--confirm`
+// steps, and unchanged by this PR. There is no new path by which either
+// `dartAction` can run without its gate having already been satisfied.
+//
+// ## `delete-confirm`/`restore-confirm` — interrupt-safety, investigated
+//
+// A subprocess kill is handled cleanly by the OS; an in-process `dartAction`
+// interrupted mid-operation (app crash, forced quit) could in principle
+// leave things worse. Investigated against [SafeFileMover] (the primitive
+// both [runDeleteConfirmStep] and [runRestoreConfirmStep] delegate every
+// real move to, via [DuplicateDeleter]/[TrashRestorer]) and found **no
+// meaningfully worse interrupt-safety than the status quo**:
+//
+// - **Same-filesystem move** (the overwhelmingly common case — staging,
+//   trash, and original locations all live under the single `$HD_PATH`
+//   tree): [SafeFileMover._moveFile] calls `File.rename`, a single atomic
+//   rename(2) syscall — a kill at any point either lands with the file at
+//   the old path or the new path, never both/neither/partial. This is
+//   exactly what GNU `mv`'s own fast path does; no regression.
+// - **Cross-device move** (only possible if `$HD_PATH` itself straddles
+//   multiple mount points — not this pipeline's documented layout, but not
+//   impossible): [SafeFileMover.copyVerifyAndReplace] copies, verifies the
+//   byte length matches, and only then deletes the original — the original
+//   is never removed before the copy is confirmed intact. A kill mid-copy
+//   or between copy-and-verify leaves the original intact and a partial/
+//   absent destination: no data loss, no worse than the Bash scripts' own
+//   cross-device fallback (GNU `mv` performs the identical copy-then-
+//   unlink-original sequence when `rename(2)` fails with `EXDEV`). The
+//   worst possible outcome of a kill in this fallback path — if it lands
+//   *after* verification succeeds but before the original's `File.delete()`
+//   call completes — is a harmless duplicate (both copies present), never a
+//   lost file.
+// - **Multi-file loop granularity**: both [DuplicateDeleter.run] and
+//   [TrashRestorer.run] process one file at a time, sequentially, the same
+//   granularity as the Bash scripts' own `while read` loops. An interrupt
+//   between files leaves exactly the files already processed moved and the
+//   rest untouched — identical to interrupting the Bash loop at the
+//   equivalent point. No new batching/buffering was introduced that could
+//   widen this window.
+//
+// Conclusion: the Dart confirm-gated actions are exactly as interrupt-safe
+// as the Bash scripts they replace — no new data-loss window opened by this
+// migration.
 //
 // ## Design note: none of these catch a thrown exception from the
 // underlying ported module
@@ -549,6 +598,106 @@ Future<PipelineRunResult> runDeleteDryRunStep(
   return PipelineRunResult(exitCode: 0, output: text, stdoutOutput: text);
 }
 
+/// Dart-native replacement for `bash scripts/06_delete_duplicates.sh
+/// --confirm` — the `delete-confirm` step, the pipeline's highest-stakes
+/// action alongside [runRestoreConfirmStep]. Wraps [DuplicateDeleter] with
+/// `confirm: true`, using the exact same [_pipelineChildPath]-derived
+/// `stagingRoot`/`trashRoot`/report-path conventions as
+/// [runDeleteDryRunStep], so a real dry-run's output and a real confirm
+/// run's effect always agree on which files are candidates. Every real move
+/// is delegated to [SafeFileMover.moveRenamingOnCollision] (matching the
+/// Bash script's `unique_destination()`-based `trash_file()`) — see this
+/// file's "interrupt-safety, investigated" design note above.
+///
+/// Reachable only after `canRunStep()` (`pipeline_runner.dart`, untouched by
+/// this PR) confirms `delete-dry-run` succeeded and the thumbnail-diff
+/// review dialog (issue #49) was acknowledged — that gate is enforced
+/// caller-side in `media_pipeline_app.dart`, entirely orthogonal to this
+/// function's execution mechanism; nothing here can run ahead of it.
+///
+/// Emits real per-file progress (`Trashed:`/`Trashed (renamed...)`/
+/// `Missing, skipping:`/`Refusing outside staging:`) as each file is
+/// processed, plus a final tally, matching this PR's log-visibility
+/// requirement — this is the action a human is watching most closely.
+Future<PipelineRunResult> runDeleteConfirmStep(
+  PipelineSettings settings,
+  LogSink? onLog,
+) async {
+  // See `runDeleteDryRunStep`'s doc comment on why `emit` (not a live-only
+  // `onLog` call) is used for every line, from the very first.
+  final buffer = StringBuffer();
+  void emit(String line) {
+    buffer.writeln(line);
+    onLog?.call('$line\n');
+  }
+
+  final stagingRoot = _pipelineChildPath(settings.hdPath, 'cleaning_staging');
+  final trashRoot = _pipelineChildPath(settings.hdPath, 'media_trash');
+  final reportPaths = [
+    _pipelineChildPath(settings.reportDir, 'duplicate_images.txt'),
+    _pipelineChildPath(settings.reportDir, 'duplicate_videos.txt'),
+    _pipelineChildPath(settings.reportDir, 'duplicate_files.txt'),
+  ];
+
+  emit('CONFIRM MODE: files WILL be moved to $trashRoot');
+
+  final deleter = DuplicateDeleter(
+    stagingRoot: stagingRoot,
+    trashRoot: trashRoot,
+  );
+  final reportOutcomes = await deleter.run(
+    reportPaths: reportPaths,
+    confirm: true,
+  );
+
+  var trashedCount = 0;
+  var suffixCount = 0;
+  var missingCount = 0;
+  var refusedCount = 0;
+
+  for (final outcome in reportOutcomes) {
+    if (!outcome.found) {
+      continue;
+    }
+    emit('==> Processing duplicate report: ${outcome.reportPath}');
+    for (final group in outcome.groups) {
+      emit('Keep: ${group.keepPath}');
+      for (final trashOutcome in group.trashOutcomes) {
+        switch (trashOutcome.action) {
+          case DuplicateFileAction.trashed:
+            trashedCount++;
+            emit('Trashed: ${trashOutcome.path}');
+          case DuplicateFileAction.trashedWithSuffix:
+            suffixCount++;
+            emit(
+              'Trashed (renamed to avoid collision): ${trashOutcome.path} '
+              '-> ${trashOutcome.destinationPath}',
+            );
+          case DuplicateFileAction.missing:
+            missingCount++;
+            emit('Missing, skipping: ${trashOutcome.path}');
+          case DuplicateFileAction.refusedOutsideStaging:
+            refusedCount++;
+            emit('Refusing outside staging: ${trashOutcome.path}');
+          case DuplicateFileAction.wouldTrash:
+            // Unreachable in confirm mode (confirm is always true above).
+            break;
+        }
+      }
+      emit('');
+    }
+  }
+
+  emit('Done.');
+  emit(
+    'Trashed: $trashedCount (of which $suffixCount renamed to avoid a '
+    'collision); missing: $missingCount; refused: $refusedCount.',
+  );
+
+  final text = buffer.toString();
+  return PipelineRunResult(exitCode: 0, output: text, stdoutOutput: text);
+}
+
 /// Dart-native replacement for `bash scripts/11_restore_from_trash.sh` run
 /// without `--confirm` — the `restore-dry-run` step. Wraps
 /// [TrashRestorer], never touching the filesystem beyond listing
@@ -590,6 +739,81 @@ Future<PipelineRunResult> runRestoreDryRunStep(
     emit('Would restore: ${outcome.trashPath} -> ${outcome.destinationPath}');
   }
   emit('Dry-run only. Re-run with --confirm to restore.');
+
+  final text = buffer.toString();
+  return PipelineRunResult(exitCode: 0, output: text, stdoutOutput: text);
+}
+
+/// Dart-native replacement for `bash scripts/11_restore_from_trash.sh
+/// --confirm` — the `restore-confirm` step, the pipeline's sole recovery
+/// mechanism's actual write path. Wraps [TrashRestorer] with
+/// `confirm: true`; every real move is delegated to
+/// [SafeFileMover.moveNoClobber] (matching the Bash script's plain `mv -n`
+/// exactly — see this file's "interrupt-safety, investigated" design note
+/// above, which applies identically here).
+///
+/// Reachable only after `canRunStep()` confirms `restore-dry-run` succeeded
+/// — enforced caller-side in `media_pipeline_app.dart`, orthogonal to this
+/// function's execution mechanism, unchanged by this PR.
+///
+/// **Log-text note (not a behavioral divergence):** the real Bash script
+/// prints `Restored: $dest` unconditionally after every `mv -n` call, even
+/// when `mv -n` silently no-ops because the destination already exists (a
+/// pre-existing quirk of the Bash script's own control flow — `mv -n`
+/// exits 0 whether or not it actually moved anything, and the `echo` after
+/// it doesn't check). This port has the [RestoreAction] to distinguish the
+/// two cases accurately and reports each truthfully (`Restored:` vs
+/// `Skipped (destination already exists):`) rather than reproducing that
+/// misleading Bash message — the *file-move behavior* (skip-on-collision,
+/// nothing overwritten, nothing deleted) is unchanged and verified by this
+/// PR's mirror-image parity test; only the human-facing log line is more
+/// accurate than the Bash original.
+Future<PipelineRunResult> runRestoreConfirmStep(
+  PipelineSettings settings,
+  LogSink? onLog,
+) async {
+  // See `runDeleteDryRunStep`'s doc comment on why `emit` (not a live-only
+  // `onLog` call) is used for every line, from the very first.
+  final buffer = StringBuffer();
+  void emit(String line) {
+    buffer.writeln(line);
+    onLog?.call('$line\n');
+  }
+
+  final trashRoot = _pipelineChildPath(settings.hdPath, 'media_trash');
+  emit('CONFIRM MODE: files WILL be restored from $trashRoot');
+
+  const restorer = TrashRestorer();
+  final List<RestoreOutcome> outcomes;
+  try {
+    outcomes = await restorer.run(trashRoot: trashRoot, confirm: true);
+  } on TrashRootNotFoundException catch (error) {
+    emit('Trash root does not exist: $trashRoot ($error)');
+    final text = buffer.toString();
+    return PipelineRunResult(exitCode: 1, output: text, stdoutOutput: text);
+  }
+
+  var restoredCount = 0;
+  var skippedCount = 0;
+  for (final outcome in outcomes) {
+    switch (outcome.action) {
+      case RestoreAction.restored:
+        restoredCount++;
+        emit('Restored: ${outcome.destinationPath}');
+      case RestoreAction.skippedExisting:
+        skippedCount++;
+        emit(
+          'Skipped (destination already exists): ${outcome.trashPath} -> '
+          '${outcome.destinationPath}',
+        );
+      case RestoreAction.wouldRestore:
+        // Unreachable in confirm mode (confirm is always true above).
+        break;
+    }
+  }
+
+  emit('');
+  emit('Restored: $restoredCount; skipped (already existed): $skippedCount.');
 
   final text = buffer.toString();
   return PipelineRunResult(exitCode: 0, output: text, stdoutOutput: text);

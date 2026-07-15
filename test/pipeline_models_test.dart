@@ -3,15 +3,25 @@ import 'package:media_pipeline_app/src/pipeline_models.dart';
 import 'package:media_pipeline_app/src/pipeline_runner.dart';
 
 void main() {
-  test('confirm cleanup keeps explicit confirm argument', () {
-    final step = buildPipelineSteps().singleWhere(
-      (step) => step.id == 'delete-confirm',
-    );
+  test(
+    'delete-confirm is Dart-native (issue #76) and never a --confirm '
+    'command',
+    () {
+      final step = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'delete-confirm',
+      );
 
-    expect(step.command!.arguments, contains('--confirm'));
-    expect(step.requiresDryRunStepId, 'delete-dry-run');
-    expect(step.risk, PipelineRisk.confirmRequired);
-  });
+      // Migrated from `command` to `dartAction` (issue #76) — see
+      // `pipeline_models.dart`'s `runDeleteConfirmStep`. There is no
+      // `PipelineCommand` at all any more, so there is no argument list
+      // that could ever carry `--confirm` — a stronger guarantee than the
+      // old "the arguments list contains --confirm" check.
+      expect(step.command, isNull);
+      expect(step.dartAction, isNotNull);
+      expect(step.requiresDryRunStepId, 'delete-dry-run');
+      expect(step.risk, PipelineRisk.confirmRequired);
+    },
+  );
 
   test(
     'dry-run cleanup is Dart-native (issue #76) and never a --confirm '
