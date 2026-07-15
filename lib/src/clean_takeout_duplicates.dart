@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'filesystem_ops.dart';
+import 'tools_container.dart';
 
 /// Dart port of `scripts/12_clean_immich_takeout_duplicates.sh` (Phase 0b of
 /// issue #76/#77's shared roadmap; third of the four confirm-gated
@@ -74,6 +75,77 @@ import 'filesystem_ops.dart';
 /// which may carry a numbered suffix. This does not affect the verify/skip
 /// *decision* logic that the Bash-vs-Dart parity test in
 /// `test/clean_takeout_duplicates_test.dart` verifies.
+///
+/// ## Design decision: `sha256sum` execution routes through [ToolsContainer]
+/// (Phase 2 of issue #76)
+///
+/// Third real consumer migration of #76 Phase 2 (container wiring), after
+/// `dedupe_live_photos.dart`'s `ffprobe` migration (PR #94) and
+/// `stitch_metadata.dart`'s `unzip`/`tar`/`exiftool` migration (PR #95).
+/// [containerFileHasher] is now the sanctioned production [FileHasher] — it
+/// execs the real, pinned `sha256sum` from the `media-pipeline-tools` image
+/// (Phase 1, `docker/tools/Dockerfile`) via a caller-owned, already-
+/// [ToolsContainer.start]ed [ToolsContainer], translating the host file path
+/// to its container-mounted equivalent via [ToolsContainer.hostToContainerPath]
+/// before every exec — mirroring [containerFfprobeDurationReader]'s shape in
+/// `dedupe_live_photos.dart` exactly (single-tool, simple parseable stdout,
+/// no filesystem side effects — this migration is structurally the simplest
+/// of the three so far, as flagged in this PR's own task brief).
+///
+/// **Hard cutover, not a fallback pair.** [TakeoutDuplicateCleaner]'s
+/// [TakeoutDuplicateCleaner.hasher] is now a *required* constructor
+/// parameter — there is no longer an implicit default that silently shells
+/// out to a host-installed `sha256sum`. Same rationale as the prior two
+/// migrations: this repo's target users already run Docker (a hard
+/// requirement for Immich itself), so there is no real deployment scenario
+/// where the container path is unavailable but a Dart-native pipeline run
+/// still needs to work; keeping a "just in case" host fallback would only
+/// invite a caller to accidentally bypass the container path (and its
+/// path-translation safety net) by omission. [defaultFileHasher] (host
+/// `Process.run`) is kept — it is still the most direct way to exercise this
+/// module's decision logic in a unit test without standing up a container,
+/// and every existing caller in `test/clean_takeout_duplicates_test.dart`
+/// already passes it (or a synthetic lambda) explicitly — but it is
+/// deliberately no longer wired in as this class's default, so nothing
+/// reaches it by omission.
+///
+/// [verifyTakeoutDuplicateCandidate]'s own `hasher` parameter (the pure
+/// three-way decision function, not the orchestration class) is left
+/// unchanged — it already defaults to [defaultFileHasher] purely as a
+/// convenience for direct unit tests, every one of which already injects its
+/// own synthetic `hasher` lambda (see `test/clean_takeout_duplicates_test.dart`'s
+/// `verifyTakeoutDuplicateCandidate` group) rather than relying on that
+/// default, and the verification *logic* itself is explicitly out of scope
+/// for this migration — only how [TakeoutDuplicateCleaner] sources its hash
+/// changes.
+///
+/// **`sha256sum`'s provenance in the pinned image.** Unlike `exiftool`,
+/// `ffmpeg`, `rclone`, and `czkawka_cli`, `sha256sum` is not itself
+/// explicitly installed or version-pinned in `docker/tools/Dockerfile` — it
+/// arrives as a transitive dependency of the `debian:bookworm-slim` base
+/// image (GNU coreutils, part of that base image's minimal package set).
+/// Astrid's PR #93 review flagged this as an undocumented gap: the base
+/// image is pinned by digest (so the coreutils version inside it is
+/// reproducible build-to-build), but nothing said so in prose the way the
+/// four explicit tools are documented. This PR makes that dependency
+/// explicit in `docker/tools/README.md` (a new "GNU coreutils / `sha256sum`"
+/// table entry, "Deviations" note, and "Bumping" step) rather than adding an
+/// explicit `apt-get install coreutils` line to the `Dockerfile` — see that
+/// file's own inline comment, added by this PR, for why a Dockerfile change
+/// was judged unnecessary (coreutils is `Essential: yes` in Debian and
+/// cannot be absent from *any* `debian:bookworm-slim` image; pinning
+/// something that can't not be there would be pinning theater, not a real
+/// safety improvement — the base image digest pin already covers it).
+///
+/// **Not yet wired into the app.** Same "port the mechanism, defer the
+/// wiring" pattern as every other port in this series: no caller in
+/// `pipeline_models.dart`/`media_pipeline_app.dart` constructs a
+/// [ToolsContainer] or calls [TakeoutDuplicateCleaner] yet. That means this
+/// PR does not change any live runtime behavior — it changes what the
+/// *sanctioned* production seam is, ahead of the future PR that actually
+/// wires `TakeoutDuplicateCleaner.run` into the app (at which point that
+/// caller is expected to wrap the whole call in [ToolsContainer.withSession]
+/// and pass `containerFileHasher(container: container)` in).
 
 // ---------------------------------------------------------------------------
 // Typed confirmation phrase (see design decision above)
@@ -95,9 +167,7 @@ bool isTakeoutDuplicatesConfirmationPhraseValid(String typed) =>
 // Pure logic: localized year-folder name matching
 // ---------------------------------------------------------------------------
 
-final RegExp _localizedYearFolderNamePattern = RegExp(
-  r'^Fotos de ([0-9]{4})$',
-);
+final RegExp _localizedYearFolderNamePattern = RegExp(r'^Fotos de ([0-9]{4})$');
 
 /// Port of the Bash script's
 /// `[[ "$localized_name" =~ ^Fotos\ de\ ([0-9]{4})$ ]]` check: returns the
@@ -144,12 +214,16 @@ enum TakeoutDuplicateVerification {
 typedef FileSizer = Future<int> Function(String path);
 
 /// Computes a file's content hash (SHA-256, matching the Bash script's
-/// `sha256sum`). The default ([defaultFileHasher]) shells out to the real
-/// `sha256sum` binary — the same external-tool convention
-/// `pipeline_models.dart` already declares for this pipeline step
-/// (`requiredTools: ['sha256sum']`) — rather than adding a new Dart hashing
-/// package dependency. Tests can inject a fake to exercise the decision
-/// logic without real files or subprocesses.
+/// `sha256sum`) — the same external-tool convention `pipeline_models.dart`
+/// already declares for this pipeline step (`requiredTools: ['sha256sum']`)
+/// — rather than adding a new Dart hashing package dependency.
+/// [TakeoutDuplicateCleaner] takes this as a *required* constructor
+/// parameter (no implicit default — see this file's top-level "Design
+/// decision: `sha256sum` execution routes through [ToolsContainer]" doc
+/// comment); the sanctioned production implementation is
+/// [containerFileHasher]. [defaultFileHasher] (host `Process.run`) remains
+/// available as a lower-ceremony way to exercise this module's decision
+/// logic in a test without standing up a container.
 typedef FileHasher = Future<String> Function(String path);
 
 /// Checks whether a file exists at [path]. The default
@@ -163,12 +237,19 @@ Future<int> defaultFileSizer(String path) => File(path).length();
 /// Default [PathExistsChecker]: `File(path).exists()`.
 Future<bool> defaultPathExists(String path) => File(path).exists();
 
-/// Default [FileHasher]: shells out to `sha256sum`, matching the Bash
-/// script's `sha256sum "$1" | awk '{print $1}'` exactly (the first
+/// Builds a host-`Process.run`-based [FileHasher]: shells out to
+/// [sha256sumBin] (defaulting to `sha256sum`), matching the Bash script's
+/// `sha256sum "$1" | awk '{print $1}'` exactly (the first
 /// whitespace-separated token of `sha256sum`'s output is the hex digest).
-Future<String> defaultFileHasher(String path) async {
+/// Not the production seam any more (see [containerFileHasher]) — kept as a
+/// direct, container-free way for a test to exercise this module's decision
+/// logic against a real or stand-in `sha256sum` binary.
+Future<String> defaultFileHasher(
+  String path, {
+  String sha256sumBin = 'sha256sum',
+}) async {
   final result = await Process.run(
-    'sha256sum',
+    sha256sumBin,
     [path],
     stdoutEncoding: utf8,
     stderrEncoding: utf8,
@@ -182,6 +263,56 @@ Future<String> defaultFileHasher(String path) async {
   final stdout = result.stdout as String;
   final firstToken = stdout.trim().split(RegExp(r'\s+')).first;
   return firstToken;
+}
+
+/// Builds the sanctioned production [FileHasher]: execs the real
+/// `sha256sum` binary bundled in the `media-pipeline-tools` image (Phase 1,
+/// `docker/tools/Dockerfile`) inside an already-[ToolsContainer.start]ed
+/// [container], via [ToolsContainer.exec].
+///
+/// [path] (as always with [FileHasher]) is a *host* absolute path — this
+/// function translates it to the container-mounted equivalent via
+/// [ToolsContainer.hostToContainerPath] before passing it to `sha256sum`,
+/// since the container only ever sees its own bind-mounted view of the
+/// filesystem. [ToolsContainer.hostToContainerPath] itself fails loudly
+/// ([ArgumentError]) if [path] falls outside [container]'s `hostMountRoot`
+/// — this function does not add its own separate check, it relies on that
+/// existing fail-loud contract.
+///
+/// [container] must already be started ([ToolsContainer.start] /
+/// [ToolsContainer.withSession]) — this function only execs into it, it does
+/// not manage the container's lifecycle. A caller processing many candidate
+/// files (as [TakeoutDuplicateCleaner.run] does — up to two hashes per
+/// candidate, canonical and duplicate) should start one long-lived container
+/// for the whole run, not one per file — see `tools_container.dart`'s own
+/// top-level doc comment on why `docker exec` into a kept-alive container,
+/// rather than a fresh `docker run` per call, is the point of
+/// [ToolsContainer] at all.
+///
+/// Same parsing convention as [defaultFileHasher]: the first
+/// whitespace-separated token of `sha256sum`'s stdout is the hex digest.
+/// Throws [FileSystemException] on a non-zero exit, exactly like
+/// [defaultFileHasher] — [verifyTakeoutDuplicateCandidate] never catches a
+/// hasher failure and silently treats it as a mismatch; a hashing failure is
+/// always a loud error, never a false "not a duplicate" verdict.
+FileHasher containerFileHasher({
+  required ToolsContainer container,
+  String sha256sumBin = 'sha256sum',
+}) {
+  return (String path) async {
+    final containerPath = container.hostToContainerPath(path);
+    final result = await container.exec([sha256sumBin, containerPath]);
+    if (result.exitCode != 0) {
+      throw FileSystemException(
+        'sha256sum failed for "$path" (container path "$containerPath"): '
+        '${result.stderr}',
+        path,
+      );
+    }
+    final stdout = result.stdout as String;
+    final firstToken = stdout.trim().split(RegExp(r'\s+')).first;
+    return firstToken;
+  };
 }
 
 /// Port of `inspect_candidate`'s three-way verification: does a file exist
@@ -403,8 +534,8 @@ class TakeoutCleanupSummary {
 class TakeoutDuplicateCleaner {
   const TakeoutDuplicateCleaner({
     required this.trashRoot,
+    required this.hasher,
     this.sizer = defaultFileSizer,
-    this.hasher = defaultFileHasher,
     this.copier = defaultFileCopier,
   });
 
@@ -415,8 +546,11 @@ class TakeoutDuplicateCleaner {
   /// `File.length()` implementation.
   final FileSizer sizer;
 
-  /// Only ever overridden by tests; real callers always get the default
-  /// `sha256sum` shell-out implementation.
+  /// *Required* — no implicit host `sha256sum` fallback (see this file's
+  /// top-level "Design decision: `sha256sum` execution routes through
+  /// [ToolsContainer]" doc comment). Real callers pass
+  /// [containerFileHasher]; tests pass [defaultFileHasher] or a synthetic
+  /// lambda explicitly.
   final FileHasher hasher;
 
   /// Only ever overridden by tests (see [FileCopier]'s doc comment on
@@ -618,10 +752,7 @@ class TakeoutDuplicateCleaner {
             destinationPath: dst,
           );
         }
-        final outcome = await mover.moveRenamingOnCollision(
-          duplicatePath,
-          dst,
-        );
+        final outcome = await mover.moveRenamingOnCollision(duplicatePath, dst);
         return TakeoutDuplicateOutcome(
           duplicatePath: duplicatePath,
           canonicalPath: canonicalPath,
