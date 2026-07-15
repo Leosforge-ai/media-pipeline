@@ -3,6 +3,44 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_pipeline_app/src/stitch_metadata.dart';
+import 'package:media_pipeline_app/src/tools_container.dart';
+
+/// True only if a real Docker daemon is reachable from this machine. Mirrors
+/// `test/tools_container_test.dart`'s/`test/dedupe_live_photos_test.dart`'s
+/// own `_dockerAvailable` exactly (duplicated here rather than shared,
+/// matching those files' own precedent of duplicating this small check
+/// rather than sharing it across test files in this repo).
+bool _dockerAvailable() {
+  try {
+    final result = Process.runSync('docker', [
+      'version',
+      '--format',
+      '{{.Server.Version}}',
+    ]);
+    return result.exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// True only if the `media-pipeline-tools:local` image is already built
+/// locally, per `docker/tools/README.md`. Mirrors
+/// `test/tools_container_test.dart`'s own `_toolsImageAvailable`.
+bool _toolsImageAvailable() {
+  try {
+    final result = Process.runSync('docker', [
+      'image',
+      'inspect',
+      kDefaultToolsImage,
+    ]);
+    return result.exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+final bool _dockerReady = _dockerAvailable();
+final bool _imageReady = _dockerReady && _toolsImageAvailable();
 
 /// Finds the repo root by walking up from this test file's directory until
 /// `scripts/04_stitch_metadata.py` is found. Mirrors the same
@@ -893,4 +931,474 @@ void main() {
       );
     },
   );
+
+  group(
+    'container path-safety composition (no Docker needed — fake docker '
+    'runner exercises the argument-building/error-handling logic '
+    'deterministically, same posture as test/tools_container_test.dart\'s '
+    'own "fake docker runner" group)',
+    () {
+      /// Builds a [ToolsContainer] whose fake `docker` runner: answers
+      /// `docker run` with a canned container ID, records every other call
+      /// into [execCalls], answers an `unzip -Z1` listing call with
+      /// [zipMembers] (one member per line), and answers every other exec
+      /// (an actual extraction, or an unrecognized command) with a bare
+      /// success.
+      Future<ToolsContainer> startFakeContainer({
+        required List<List<String>> execCalls,
+        List<String> zipMembers = const [],
+      }) async {
+        final container = ToolsContainer(
+          hostMountRoot: '/mnt/target_drive',
+          runner: (args) async {
+            if (args.first == 'run') {
+              return ProcessResult(0, 0, 'container123\n', '');
+            }
+            execCalls.add(args);
+            if (args.contains('-Z1')) {
+              return ProcessResult(0, 0, '${zipMembers.join('\n')}\n', '');
+            }
+            return ProcessResult(0, 0, '', '');
+          },
+        );
+        await container.start();
+        return container;
+      }
+
+      test(
+        'containerZipLister and containerZipExtractor translate every host '
+        'path (archive path, destDir) to its container equivalent before '
+        'exec\'ing',
+        () async {
+          final execCalls = <List<String>>[];
+          final container = await startFakeContainer(
+            execCalls: execCalls,
+            zipMembers: ['Google Photos/IMG_1.jpg'],
+          );
+
+          final lister = containerZipLister(container: container);
+          final members = await lister(
+            '/mnt/target_drive/raw_takeout_zips/takeout.zip',
+          );
+          expect(members, ['Google Photos/IMG_1.jpg']);
+          expect(execCalls.last, [
+            'exec',
+            'container123',
+            'unzip',
+            '-Z1',
+            '/data/raw_takeout_zips/takeout.zip',
+          ]);
+
+          final extractor = containerZipExtractor(container: container);
+          await extractor(
+            '/mnt/target_drive/raw_takeout_zips/takeout.zip',
+            '/mnt/target_drive/takeout_extracted/takeout',
+          );
+          expect(execCalls.last, [
+            'exec',
+            'container123',
+            'unzip',
+            '-o',
+            '-d',
+            '/data/takeout_extracted/takeout',
+            '/data/raw_takeout_zips/takeout.zip',
+          ]);
+        },
+      );
+
+      test(
+        'containerTarLister and containerTarExtractor translate every host '
+        'path to its container equivalent before exec\'ing',
+        () async {
+          final execCalls = <List<String>>[];
+          final container = await startFakeContainer(execCalls: execCalls);
+
+          final extractor = containerTarExtractor(container: container);
+          await extractor(
+            '/mnt/target_drive/raw_takeout_zips/takeout.tgz',
+            '/mnt/target_drive/takeout_extracted/takeout',
+          );
+          expect(execCalls.last, [
+            'exec',
+            'container123',
+            'tar',
+            '-xzf',
+            '/data/raw_takeout_zips/takeout.tgz',
+            '-C',
+            '/data/takeout_extracted/takeout',
+          ]);
+
+          final lister = containerTarLister(container: container);
+          await lister('/mnt/target_drive/raw_takeout_zips/takeout.tgz');
+          expect(execCalls.last, [
+            'exec',
+            'container123',
+            'tar',
+            '-tzf',
+            '/data/raw_takeout_zips/takeout.tgz',
+          ]);
+        },
+      );
+
+      test(
+        'an unsafe archive member is blocked before any container extract '
+        'exec runs, even when routed entirely through the container-backed '
+        'lister/extractor (isPathTraversalSafe still runs first, on '
+        'host-domain paths, unaware a container is even involved)',
+        () async {
+          final execCalls = <List<String>>[];
+          final container = await startFakeContainer(
+            execCalls: execCalls,
+            zipMembers: ['../evil.jpg'],
+          );
+
+          final extractor = containerTakeoutArchiveExtractor(
+            container: container,
+          );
+          await expectLater(
+            extractor.extract(
+              '/mnt/target_drive/raw_takeout_zips/evil.zip',
+              '/mnt/target_drive/takeout_extracted/evil',
+              ArchiveKind.zip,
+            ),
+            throwsA(isA<StateError>()),
+          );
+
+          // Only the listing exec (-Z1) ran; no extraction exec (-o) was
+          // ever issued — the member-safety check aborted first.
+          expect(execCalls.where((c) => c.contains('-o')), isEmpty);
+        },
+      );
+
+      test(
+        'a destDir outside the container\'s mount root is rejected — even '
+        'when every archive member is individually safe — because '
+        'ToolsContainer.hostToContainerPath checks a completely separate '
+        'axis (mount boundary) from isPathTraversalSafe (member vs. '
+        'destDir), and neither substitutes for the other',
+        () async {
+          final execCalls = <List<String>>[];
+          final container = await startFakeContainer(
+            execCalls: execCalls,
+            zipMembers: ['Google Photos/IMG_1.jpg'],
+          );
+
+          final extractor = containerTakeoutArchiveExtractor(
+            container: container,
+          );
+          await expectLater(
+            extractor.extract(
+              '/mnt/target_drive/raw_takeout_zips/takeout.zip',
+              // Outside hostMountRoot ("/mnt/target_drive") entirely.
+              '/mnt/other_drive/takeout_extracted/takeout',
+              ArchiveKind.zip,
+            ),
+            throwsArgumentError,
+          );
+
+          // Every member passed isPathTraversalSafe (it's a perfectly
+          // normal relative path) — the rejection came entirely from the
+          // mount-boundary check, and no extraction exec was ever issued.
+          expect(execCalls.where((c) => c.contains('-o')), isEmpty);
+        },
+      );
+
+      test(
+        'containerExiftoolRunner translates only the trailing media-path '
+        'argument, leaving every flag/value argument untouched',
+        () async {
+          final execCalls = <List<String>>[];
+          final container = await startFakeContainer(execCalls: execCalls);
+
+          final runner = containerExiftoolRunner(container: container);
+          final result = await runner([
+            '-overwrite_original',
+            '-Title=Clean',
+            '/mnt/target_drive/takeout_extracted/x/clean.jpg',
+          ]);
+
+          expect(result.$1, 0);
+          expect(execCalls.last, [
+            'exec',
+            'container123',
+            'exiftool',
+            '-overwrite_original',
+            '-Title=Clean',
+            '/data/takeout_extracted/x/clean.jpg',
+          ]);
+        },
+      );
+
+      test(
+        'containerExiftoolRunner throws ArgumentError (never silently '
+        'mistranslates) for a media path outside the container\'s mount '
+        'root',
+        () async {
+          final execCalls = <List<String>>[];
+          final container = await startFakeContainer(execCalls: execCalls);
+
+          final runner = containerExiftoolRunner(container: container);
+          await expectLater(
+            runner(['-overwrite_original', '/etc/passwd']),
+            throwsArgumentError,
+          );
+          expect(
+            execCalls,
+            isEmpty,
+            reason:
+                'the path-translation failure must happen before any '
+                'exec is issued',
+          );
+        },
+      );
+    },
+  );
+
+  group(
+    'stitch metadata via a real ToolsContainer (requires Docker + the '
+    'media-pipeline-tools:local image built per docker/tools/README.md)',
+    () {
+      late Directory tempDir;
+
+      setUp(() async {
+        tempDir = await Directory.systemTemp.createTemp(
+          'stitch_metadata_container_test_',
+        );
+        // Same UID-mismatch workaround as
+        // test/dedupe_live_photos_test.dart's real-ToolsContainer group:
+        // the `media-pipeline-tools` image runs as a fixed non-root UID
+        // (`tools`, uid 10000), which will not generally match this test's
+        // own host UID. Real UID/GID mapping is Phase 3 of issue #76, not
+        // yet implemented — until then, this test-only fixture directory is
+        // made world-writable so the container can write into it. Scoped to
+        // this temp test fixture only.
+        await Process.run('chmod', ['0777', tempDir.path]);
+      });
+
+      tearDown(() async {
+        if (await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
+      test(
+        'extracts a real zip archive with real unzip, applies real '
+        'exiftool metadata to a genuine generated image, and moves both '
+        'the tagged file and a missing-sidecar file to cleaning_staging — '
+        'proving the full host path -> container path translation -> real '
+        'unzip/exiftool exec -> host-visible result chain, not just its '
+        'pieces in isolation',
+        () async {
+          final hdPath = tempDir.path;
+          final container = ToolsContainer(hostMountRoot: hdPath);
+          await container.start();
+          try {
+            final srcDir = Directory('$hdPath/src/Google Photos');
+            await srcDir.create(recursive: true);
+            // Newly created subdirectories don't inherit tempDir's own
+            // 0777 mode (Directory.create uses the process umask), so the
+            // container's non-root uid still can't write into srcDir
+            // without this — same UID-mismatch workaround as setUp's
+            // chmod on tempDir itself, just applied recursively since
+            // ffmpeg needs to write a new file *inside* this nested
+            // directory.
+            await Process.run('chmod', ['-R', '0777', srcDir.path]);
+
+            // Generate a real, genuinely-encoded 1-frame JPEG using the
+            // pinned image's own ffmpeg (not a pre-baked fixture checked
+            // into the repo), writing directly to the bind-mounted host
+            // directory via a container exec — this is the same "generate
+            // with the image's own tools" pattern
+            // dedupe_live_photos_test.dart's real-ToolsContainer group uses
+            // for its synthetic video.
+            final hostImagePath = '${srcDir.path}/clean.jpg';
+            final containerImagePath = container.hostToContainerPath(
+              hostImagePath,
+            );
+            final genResult = await container.exec([
+              'ffmpeg',
+              '-y',
+              '-f',
+              'lavfi',
+              '-i',
+              'color=c=red:s=32x32:d=1',
+              '-frames:v',
+              '1',
+              '-update',
+              '1',
+              containerImagePath,
+            ]);
+            expect(
+              genResult.exitCode,
+              0,
+              reason:
+                  'ffmpeg synthetic-image generation failed: '
+                  '${genResult.stderr}',
+            );
+            expect(
+              await File(hostImagePath).exists(),
+              isTrue,
+              reason:
+                  'the file ffmpeg wrote inside the container at '
+                  '$containerImagePath must appear on the host at '
+                  '$hostImagePath via the bind mount — this is the "where '
+                  'extraction happens" contract this PR\'s doc comment '
+                  'documents, exercised here for a plain container write '
+                  'rather than an unzip/tar extraction specifically.',
+            );
+            await File('${srcDir.path}/clean.jpg.json').writeAsString(
+              jsonEncode({
+                'photoTakenTime': {'timestamp': '0'},
+                'title': 'Clean Title',
+              }),
+            );
+
+            // A second media file with no JSON sidecar at all — proves the
+            // "continue past a file that can't get metadata, still move
+            // it" hard rule holds when the archive extraction and (for the
+            // other file) the exiftool call are both real container execs,
+            // not just mocked Dart functions.
+            await File(
+              '${srcDir.path}/nosidecar.jpg',
+            ).writeAsBytes('not a real image, no sidecar exists'.codeUnits);
+
+            final rawZips = Directory(rawTakeoutZipsPath(hdPath));
+            await rawZips.create(recursive: true);
+            final archivePath = '${rawZips.path}/takeout-e2e.zip';
+            final zipResult = await Process.run('zip', [
+              '-r',
+              archivePath,
+              '.',
+            ], workingDirectory: srcDir.parent.path);
+            expect(zipResult.exitCode, 0, reason: zipResult.stderr as String);
+
+            // extractArchive() (lib/src/stitch_metadata.dart) creates the
+            // extraction destDir on the HOST, with the host process's
+            // default umask — not writable by the container's fixed
+            // non-root uid (10000). Real UID/GID mapping for bind-mounted
+            // writes is Phase 3 of #76 and not yet implemented (same
+            // known-open item test/dedupe_live_photos_test.dart's real
+            // ToolsContainer group documents for its own fixture
+            // directory). Since destDir is created *inside*
+            // extractArchive/MetadataStitcher.run — not something this test
+            // can pre-chmod before it exists — this wraps the real
+            // container extractors with a chmod of destDir right after
+            // extractArchive creates it and right before unzip/tar actually
+            // writes into it, scoped to this test fixture only (not a
+            // change to lib/**).
+            final rawZipExtractor = containerZipExtractor(
+              container: container,
+            );
+            final rawTarExtractor = containerTarExtractor(
+              container: container,
+            );
+            Future<void> chmodThenExtract(
+              ArchiveExtractRunner inner,
+              String archivePath,
+              String destDir,
+            ) async {
+              await Process.run('chmod', ['-R', '0777', destDir]);
+              await inner(archivePath, destDir);
+            }
+
+            final stitcher = MetadataStitcher(
+              exiftool: containerExiftoolRunner(container: container),
+              archiveExtractor: TakeoutArchiveExtractor(
+                zipLister: containerZipLister(container: container),
+                zipExtractor: (a, d) => chmodThenExtract(rawZipExtractor, a, d),
+                tarLister: containerTarLister(container: container),
+                tarExtractor: (a, d) => chmodThenExtract(rawTarExtractor, a, d),
+              ),
+            );
+            final summary = await stitcher.run(hdPath);
+
+            expect(summary.archivesProcessed, 1);
+            expect(summary.mediaMoved, 2);
+            expect(
+              summary.warnings,
+              1,
+              reason: 'only nosidecar.jpg (no matched JSON sidecar) warns',
+            );
+
+            final stagedCleanPath =
+                '${cleaningStagingPath(hdPath)}/Google Photos/clean.jpg';
+            final stagedNoSidecarPath =
+                '${cleaningStagingPath(hdPath)}/Google Photos/nosidecar.jpg';
+            expect(await File(stagedCleanPath).exists(), isTrue);
+            expect(await File(stagedNoSidecarPath).exists(), isTrue);
+            expect(
+              await File(archivePath).exists(),
+              isFalse,
+              reason: 'the processed archive is deleted after success',
+            );
+            expect(
+              await Directory(takeoutExtractedPath(hdPath)).list().isEmpty,
+              isTrue,
+              reason: 'the extraction scratch directory is always cleaned up',
+            );
+
+            // Independently verify — via a fresh, separate real exiftool
+            // exec, not by trusting applyMetadataWithExiftool's own return
+            // value — that the tag was actually written to the staged
+            // file.
+            final containerStagedCleanPath = container.hostToContainerPath(
+              stagedCleanPath,
+            );
+            final checkResult = await container.exec([
+              'exiftool',
+              '-s3',
+              '-Title',
+              containerStagedCleanPath,
+            ]);
+            expect(checkResult.exitCode, 0);
+            expect(
+              (checkResult.stdout as String).trim(),
+              'Clean Title',
+              reason:
+                  'proves exiftool -Title=... actually ran and persisted, '
+                  'not just that applyMetadataWithExiftool returned true',
+            );
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment (build it per '
+                  'docker/tools/README.md).',
+      );
+    },
+  );
+
+  group('Docker/image availability self-check (meta-test)', () {
+    test(
+      'this test file is actually exercising real Docker, not silently '
+      'skipping — makes the skip reason visible in test output',
+      () {
+        if (!_dockerReady) {
+          // ignore: avoid_print
+          print(
+            'NOTE: Docker daemon not reachable — the "stitch metadata via '
+            'a real ToolsContainer" group above was skipped, not run.',
+          );
+        } else if (!_imageReady) {
+          // ignore: avoid_print
+          print(
+            'NOTE: Docker is available but media-pipeline-tools:local is '
+            'not built — the "stitch metadata via a real ToolsContainer" '
+            'group above was skipped, not run. Build it per '
+            'docker/tools/README.md.',
+          );
+        } else {
+          // ignore: avoid_print
+          print(
+            'Docker + media-pipeline-tools:local are both available — the '
+            '"stitch metadata via a real ToolsContainer" group above '
+            'actually ran against a real container.',
+          );
+        }
+      },
+    );
+  });
 }
