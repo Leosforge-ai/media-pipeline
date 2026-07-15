@@ -199,3 +199,68 @@ RESUME AT: next phase is porting `06_delete_duplicates.sh` to Dart (Phase
 0b, 2/4), now with `SafeFileMover` available to reuse. #77 (Native Runtime)
 untouched — Phase 0a/0b work is shared with it, so switching designs later
 loses nothing already built.
+
+## 2026-07-15 — Shared Phase 0 (#76/#77) fully complete
+
+Finished the remaining Phase 0b scripts, Phase 0c, and one cross-cutting
+fix, all via the same Sofie → Cody+Astrid (two real separate dispatches)
+→ merge pattern:
+
+- **PR #86 — 06_delete_duplicates.sh** (`lib/src/delete_duplicates.dart`):
+  keep-scoring/report-parsing logic ported with a real Bash-vs-Dart parity
+  test. Highest-stakes port in the series (the script the whole
+  thumbnail-review dialog exists to build trust in) — deliberately kept
+  the EXECUTED step as Bash for now, only ported the logic in isolation.
+  `duplicate_report.dart`/`pipeline_models.dart`/`media_pipeline_app.dart`
+  all untouched, verified by both reviewers independently.
+- **PR #87 — 12_clean_immich_takeout_duplicates.sh**
+  (`lib/src/clean_takeout_duplicates.dart`): three-way basename+size+SHA-256
+  verification ported, with an adversarial hash-mismatch-despite-matching-size
+  test proving the check wasn't weakened to size-only.
+- **PR #88 — 13_dedupe_live_photos.sh** (`lib/src/dedupe_live_photos.dart`):
+  completes the four-script Phase 0b series. Duration-priority safety
+  property (a known-too-long video duration can never be overridden by the
+  timestamp-proximity fallback) independently verified by both reviewers
+  reading the actual control flow, not just trusting the report.
+- **PR #89 — 04_stitch_metadata.py** (`lib/src/stitch_metadata.dart`):
+  largest/most complex port — archive extraction (shells out to
+  `unzip`/`tar`, list-then-validate-then-extract path-traversal guard
+  verified by Astrid), JSON-sidecar matching, exiftool invocation.
+  Completes ALL of shared Phase 0. Found (not fixed, preserved for parity)
+  a real off-by-one bug in the ALREADY-SHIPPED Python script: silently
+  drops a valid title-only/description-only metadata tag. Filed as #91,
+  independently confirmed by both reviewers, Cody diagnosed the exact fix
+  (`len(args) == 2` not `== 3`).
+- **PR #90 — collision-handling decision**: Leo decided to match Bash's
+  real per-script behavior rather than pick one Dart-wide policy.
+  Investigation found Bash itself isn't uniform: `11_restore_from_trash.sh`
+  is a plain `mv -n` (no rename logic at all), while `06`/`12`/`13` share an
+  identical `unique_destination()` numbered-suffix algorithm. Fix: added
+  `SafeFileMover.moveRenamingOnCollision` (used by 06/12/13) alongside the
+  unchanged `moveNoClobber` (used by 11) rather than forcing one behavior
+  everywhere. Cody independently verified two subtle Bash path-splitting
+  quirks (directory-dot-wins-over-filename, dotfile-still-counts-as-having-a-dot)
+  by writing and running the real bash function live, not just reading it.
+
+**Shared Phase 0 status: DONE.** Every script in the pipeline (drive
+detection, all 4 confirm-gated destructive scripts, metadata stitching)
+now has a Dart port with a real Bash-vs-Python-vs-Dart parity test proving
+equivalence. Nothing is wired into the app yet — `pipeline_models.dart`/
+`media_pipeline_app.dart` still shell out to the original Bash/Python
+scripts in production. That's intentional: Phase 0's whole job was proving
+the ported logic is correct in isolation before anything touches the
+executed path.
+
+**Astrid's standing synthesis for the next phase** (repeated across PR
+#88/#89 reviews): the real risk from here isn't the ported logic — it's
+the seam where Bash gets swapped for Dart in the actually-running app.
+Specifically watch for: (1) the collision-rename behavior hitting a live
+case for the first time, (2) making sure whatever replaces the interactive
+typed-confirmation prompt still enforces the exact-match gate before
+`.run(confirm: true)`, (3) re-running each port's parity test against the
+actually-wired code path, not just the standalone library.
+
+RESUME AT: #76 Phase 2 — wire the Dart orchestration to the tools
+container (the actual "swap Bash for Dart in production" step Astrid
+flagged as the real risk). This is where the accumulated Phase 0 work
+starts actually mattering to what runs on Leo's real drive.
