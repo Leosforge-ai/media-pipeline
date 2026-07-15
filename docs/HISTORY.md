@@ -1209,3 +1209,112 @@ test) for the remaining Phase 2 consumer migrations (`stitch_metadata.dart`,
 `clean_takeout_duplicates.dart`, `drive_detection.dart`, `delete_duplicates.dart`). Part of #76,
 not closing it. Flagging **Cody + Astrid** review as required — first real consumer migration,
 sets the pattern for the rest.
+
+## Phase 22 — Third consumer migration: stitch-metadata routes `unzip`/`tar`/`exiftool` through `ToolsContainer` (2026-07-15)
+
+**Context:** Following Phase 21's `ffprobe` migration for `dedupe_live_photos.dart`,
+`lib/src/stitch_metadata.dart` (Phase 0c port, PR #89) is the third #76 Phase 2 consumer
+migration and the hardest so far: THREE external tools (`unzip`/`tar` for archive extraction via
+`TakeoutArchiveExtractor`, `exiftool` for metadata application), and archive extraction has real
+filesystem side effects (many files written to disk) rather than a single parseable return value.
+It also composes two independent path-safety mechanisms — `isPathTraversalSafe` (validates
+archive *member* names against the extraction destination) and
+`ToolsContainer.hostToContainerPath` (validates the extraction destination itself against the
+bind-mount boundary) — that both need to hold without one weakening the other.
+
+**Decisions:**
+- **Archive extraction routes through the container, extracting onto the bind mount.**
+  `containerZipLister`/`containerZipExtractor`/`containerTarLister`/`containerTarExtractor`
+  (bundled by `containerTakeoutArchiveExtractor`) translate every host path (archive path,
+  extraction destDir) via `ToolsContainer.hostToContainerPath` before exec'ing `unzip`/`tar`
+  inside the container. `extractArchive` still creates the extraction destDir on the *host*
+  filesystem before extraction runs (unchanged) — since that destDir lives under
+  `$HD_PATH/takeout_extracted` and callers construct their `ToolsContainer` with `hostMountRoot`
+  set to (an ancestor of) `$HD_PATH`, it's always inside the bind mount, and because a bind mount
+  is the same underlying filesystem on both sides, the host sees every file the container writes
+  the instant `docker exec` returns — no explicit sync step needed. Verified for real (not just
+  asserted) by this PR's Docker-gated end-to-end test.
+- **`exiftool` routes through the container, same pattern as `ffprobe`.**
+  `containerExiftoolRunner({required ToolsContainer container})` translates the target media
+  path — always `applyMetadataWithExiftool`'s trailing argument — via
+  `ToolsContainer.hostToContainerPath` before `container.exec(['exiftool', ...])`. The JSON
+  sidecar itself is read directly by Dart, never passed to `exiftool`, so no other argument needs
+  translation.
+- **How the two path-safety mechanisms compose (the key design call in this PR).**
+  `isPathTraversalSafe` runs entirely on host-domain paths, inside `TakeoutArchiveExtractor.extract`,
+  *before* the container-routed lister/extractor is ever invoked — it has no awareness a
+  container is even involved, and it can throw (blocking the entire archive) without any exec
+  ever happening. Separately, `ToolsContainer.hostToContainerPath` validates that the extraction
+  destDir (and the archive path) fall inside the container's `hostMountRoot` — a check about the
+  bind-mount boundary, unrelated to what's inside the archive. These check different axes
+  (member-relative-to-destDir vs. destDir-relative-to-mount-root) and neither can substitute for
+  or weaken the other: an archive with a path-traversal member is blocked regardless of whether
+  destDir is a legal container path at all, and a destDir outside the mount root is rejected
+  regardless of whether every archive member is individually safe. `test/stitch_metadata_test.dart`'s
+  new "container path-safety composition" group proves both directions directly with a fake
+  docker runner: an unsafe member never reaches an extraction exec (only the listing exec runs),
+  and a destDir outside the mount root is rejected via `ArgumentError` even when every member
+  passes `isPathTraversalSafe`, with neither test's assertion able to pass by accident from the
+  other check alone.
+- **Hard cutover, matching PR #94's precedent.** `MetadataStitcher.exiftool` and
+  `MetadataStitcher.archiveExtractor` are now *required* constructor parameters — no implicit
+  default that silently shells out to a host-installed `unzip`/`tar`/`exiftool`. Same rationale as
+  the `ffprobe` migration: this repo's target users already require Docker for Immich, so a "just
+  in case" host fallback would only invite an accidental bypass of the container path (and its
+  path-translation safety net) by omission.
+- **Parity test redesign (the single most important design decision in this PR).** The Dart side
+  of the Python-vs-Dart parity test previously called
+  `exiftoolRunner(exiftoolBin: fakeExiftool.path)` — exercising the host `Process.run` mechanism
+  against a fake binary on disk, mirroring exactly what the real Python script does via its own
+  `PATH` override. Reusing that now that production `exiftool` invocation is container-routed
+  would mean either installing a stub `exiftool` *inside* the pinned `media-pipeline-tools` image
+  just for one test, or keeping a host-process seam wired in as if it were still the production
+  path — neither is right for a test whose actual job is verifying processed/warning-count parity
+  with the real Python script, not container-exec mechanics. `_fakeExiftoolRunnerFromMarkerFile`
+  replicates the exact same marker-file protocol directly in Dart with zero process/container
+  involvement, mirroring PR #94's identical `_fakeDurationReaderFromMarkerFile` decoupling for
+  `dedupe_live_photos_test.dart`. The Python side is unchanged — it still runs the real script
+  with a fake `exiftool` on `PATH`, since Python isn't going through the container either. Archive
+  extraction in the parity test also stays on the host's real `unzip` (`TakeoutArchiveExtractor()`
+  with no arguments) — the parity test's job is decision-logic parity, not container-exec
+  mechanics, so only the exiftool invocation mechanism needed decoupling.
+- **Real end-to-end coverage.** A new Docker-gated "stitch metadata via a real ToolsContainer"
+  test starts a real `ToolsContainer`, generates a genuine JPEG with the pinned image's own
+  `ffmpeg`, builds a real zip archive (real `zip`) containing that image plus a JSON sidecar and a
+  second sidecar-less file, extracts it with real `unzip` inside the container, applies real
+  `exiftool` metadata, and independently re-reads the `-Title` tag via a fresh `exiftool` exec to
+  confirm it actually persisted (not just that `applyMetadataWithExiftool` returned `true`). The
+  sidecar-less file proves the "continue past a file that can't get metadata, still move it" hard
+  rule holds when both the extraction and the other file's `exiftool` call are real container
+  execs.
+
+**Pivots:** The real end-to-end test surfaced a genuine UID-mismatch finding: `extractArchive`
+creates the extraction destDir on the *host*, with the host process's default umask — not
+writable by the container's fixed non-root uid (10000; `docker/tools/Dockerfile`). This is the
+same known-open Phase 3 (#76) UID/GID-mapping gap Phase 21's real-container test already
+documented for its own fixture directory, now hit from a different angle (a container process
+*writing into* a host-created directory, not just reading a host-written file). Worked around
+with a test-only `chmod -R 0777` wrapped around the real container extractors, applied to
+destDir right after `extractArchive` creates it and right before `unzip`/`tar` writes into it —
+scoped entirely to the test fixture, no `lib/**` change. Also needed an ffmpeg fix: single-image
+output requires `-update 1` (without it, `-frames:v 1` alone produces an "image sequence pattern"
+error since `ffmpeg`'s `image2` muxer defaults to expecting a numbered sequence).
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green (339 tests),
+including the new real-container tests, which actually ran (Docker + `media-pipeline-tools:local`
+were available in this environment) rather than skipping.
+
+**Also verified (constraints from this repo's Safety Rules):** a container-exec failure for one
+file is caught inside `applyMetadataWithExiftool` (never propagates) — the hard
+"continue past corrupt files" rule holds identically whether the failure originates on the host
+or inside a container exec, since `containerExiftoolRunner` surfaces failures as an ordinary
+non-zero exit code through the same `ExiftoolRunner` return shape the host implementation uses.
+No media bytes are ever loaded into Dart memory by any of the new container-routed functions —
+they only pass paths and flag strings as `docker exec` arguments.
+
+**Outcome:** `stitch_metadata.dart` now has sanctioned, container-routed production paths for all
+three of its external tools, proven against a real Docker daemon end-to-end, including the
+two-mechanism path-safety composition this migration was expected to get right. Still not wired
+into `pipeline_models.dart`/`media_pipeline_app.dart` — that remains later work. Part of #76, not
+closing it. Flagging **Cody + Astrid** review as required — hardest migration in the series so
+far, touches untrusted archive input, and composes two separate path-safety mechanisms.
