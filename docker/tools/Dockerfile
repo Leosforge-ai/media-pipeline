@@ -33,6 +33,18 @@ ARG CZKAWKA_SHA256_ARM64=2d7a66cf626d64ae578e2ef502df5ea9e82aeab3d890853a2e15118
 ARG RCLONE_SHA256_AMD64=fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d
 ARG RCLONE_SHA256_ARM64=97685285c9ad6a0cf17d5844115d2a67245af6444db672187074bd9c358de419
 
+# sha256sum: NOT explicitly installed below — it ships as part of GNU coreutils,
+# which is `Essential: yes` in Debian and therefore present in every Debian/
+# bookworm-slim image, including this one, without any apt-get install line.
+# There is deliberately no explicit `apt-get install coreutils` here: an
+# "Essential: yes" package cannot be absent from ANY debian:bookworm-slim
+# image, so pinning an explicit version for it here would be pinning theater,
+# not a real safety improvement — the FROM line's own digest pin already
+# fixes coreutils' version exactly as effectively as an explicit ARG would.
+# See docker/tools/README.md's "GNU coreutils / sha256sum" section for the
+# verified version this currently resolves to and how to re-check it after a
+# base-image bump.
+
 # Set by buildx automatically for each platform in `--platform linux/amd64,linux/arm64`.
 ARG TARGETARCH
 
