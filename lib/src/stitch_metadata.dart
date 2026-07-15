@@ -467,6 +467,65 @@ ExiftoolRunner exiftoolRunner({String exiftoolBin = 'exiftool'}) {
   };
 }
 
+/// The sanctioned production [ExiftoolRunner] (Phase 2 of issue #76 — see
+/// this file's top-level "Design decision: all three external tools ...
+/// route through [ToolsContainer]" doc comment): execs the real `exiftool`
+/// bundled in the `media-pipeline-tools` image via [container.exec], inside
+/// an already-[ToolsContainer.start]ed [container].
+///
+/// [args] arrives exactly as [applyMetadataWithExiftool] builds it —
+/// `-overwrite_original`, zero or more `-Tag=value` flags, and always the
+/// target *host* media path as the last element (see
+/// [applyMetadataWithExiftool]'s `args.add(mediaPath)`). Every other
+/// element of [args] is a flag/value string, never a filesystem path (the
+/// JSON sidecar is read directly by Dart, not passed to `exiftool` at all),
+/// so only the last element needs translation. This function translates
+/// that last element via [ToolsContainer.hostToContainerPath] before
+/// exec'ing — [ToolsContainer.hostToContainerPath] itself fails loudly
+/// ([ArgumentError]) if the media path falls outside [container]'s
+/// `hostMountRoot`, and this function adds no separate check of its own, it
+/// relies on that existing fail-loud contract (same posture as
+/// [containerFfprobeDurationReader] in `dedupe_live_photos.dart`).
+///
+/// Throws [ArgumentError] if [args] is empty — [applyMetadataWithExiftool]
+/// never calls a runner with an empty argument list (it always includes at
+/// least `-overwrite_original` and the media path), so an empty [args] here
+/// indicates a caller bug, not a normal runtime condition worth mapping to a
+/// warning-and-continue outcome.
+///
+/// [container] must already be started — this function only execs into it,
+/// mirroring [containerFfprobeDurationReader]'s "caller owns the container
+/// lifecycle" contract exactly (a caller processing many media files, as
+/// [MetadataStitcher.run] does across many archives, should start one
+/// long-lived container for the whole run, not one per file).
+ExiftoolRunner containerExiftoolRunner({
+  required ToolsContainer container,
+  String exiftoolBin = 'exiftool',
+}) {
+  return (List<String> args) async {
+    if (args.isEmpty) {
+      throw ArgumentError.value(
+        args,
+        'args',
+        'must be non-empty — the last element is expected to be the '
+            'target media path',
+      );
+    }
+    final hostMediaPath = args.last;
+    final containerMediaPath = container.hostToContainerPath(hostMediaPath);
+    final translatedArgs = <String>[
+      ...args.sublist(0, args.length - 1),
+      containerMediaPath,
+    ];
+    final result = await container.exec([exiftoolBin, ...translatedArgs]);
+    return (
+      result.exitCode,
+      (result.stderr as String),
+      (result.stdout as String),
+    );
+  };
+}
+
 /// Port of `apply_metadata_with_exiftool`: reads [jsonPath], builds the
 /// same `exiftool` argument list Python builds (date/time, title,
 /// description, GPS coordinates — only including flags for metadata that's
@@ -1185,22 +1244,23 @@ class StitchMetadataSummary {
 /// stops the run rather than silently skipping to the next one — exactly
 /// matching production behavior.
 class MetadataStitcher {
-  /// [archiveExtractor] is *required* — the archive-extraction half of this
-  /// port's #76 Phase 2 container migration (see this file's top-level
+  /// [exiftool] and [archiveExtractor] are *required* — a hard cutover, no
+  /// implicit host-`Process.run` fallback (see this file's top-level
   /// "Design decision: all three external tools ... route through
-  /// [ToolsContainer]" doc comment). Real callers should pass
-  /// [containerTakeoutArchiveExtractor] (backed by an already-started
-  /// [ToolsContainer]); tests pass a fake, or the host-shelling
+  /// [ToolsContainer]" doc comment for why, matching PR #94's precedent for
+  /// `dedupe_live_photos.dart`'s `ffprobe` migration). Real callers should
+  /// pass [containerExiftoolRunner] and [containerTakeoutArchiveExtractor]
+  /// (both backed by the same already-started [ToolsContainer]); tests pass
+  /// a fake, or the host-shelling [exiftoolRunner] /
   /// `TakeoutArchiveExtractor()` (its own no-argument constructor defaults
   /// to [defaultZipLister]/[defaultZipExtractor]/[defaultTarLister]/
   /// [defaultTarExtractor]) for a container-free decision-logic check.
   MetadataStitcher({
-    ExiftoolRunner? exiftool,
+    required this.exiftool,
     required this.archiveExtractor,
     RsyncRunner? rsync,
     SafeFileMover? mover,
-  }) : exiftool = exiftool ?? exiftoolRunner(),
-       rsync = rsync ?? rsyncRunner(),
+  }) : rsync = rsync ?? rsyncRunner(),
        mover = mover ?? const SafeFileMover();
 
   final ExiftoolRunner exiftool;
