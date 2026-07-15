@@ -42,6 +42,28 @@ void main() {
     },
   );
 
+  test(
+    'scan-duplicates is Dart-native (issue #103) and requires only docker',
+    () {
+      final step = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'scan-duplicates',
+      );
+
+      // Migrated from `command` to `dartAction` (issue #103, the last
+      // remaining gap in issue #76's Phase 2) — see
+      // `pipeline_models.dart`'s `runScanDuplicatesStep`. There is no
+      // `PipelineCommand` at all any more.
+      expect(step.command, isNull);
+      expect(step.dartAction, isNotNull);
+      // `czkawka_cli` now runs inside `ToolsContainer`; `ffmpeg`/`ffprobe`/
+      // `convert` are no longer required by this step since the optional
+      // blur scan is deliberately not part of this Dart-native action (see
+      // `duplicate_scan.dart`'s "blur-scan is NOT ported" design decision).
+      expect(step.requiredTools, ['docker']);
+      expect(step.risk, PipelineRisk.reviewRequired);
+    },
+  );
+
   test('confirm step is blocked until dry-run succeeds', () {
     final confirm = buildPipelineSteps().singleWhere(
       (step) => step.id == 'delete-confirm',

@@ -1828,3 +1828,113 @@ this sequence (#99, #100, this one) is confirmed to still hold. Part of #76 (tra
 roadmap, stays open), not the whole issue. Flagging **Cody + Astrid** review as required, with extra
 emphasis per this PR's own stakes — this touches the two most destructive, least-reversible-feeling
 actions in the whole app.
+
+## Phase 28 — `scan-duplicates` wired to `dartAction`: the last #76 Phase 2 gap (issue #103)
+
+**Context:** Issue #103, filed as a status check-in on #76 after Phases 25-27 (PRs #99/#100/#101)
+migrated 6 of 7 pipeline steps. `scan-duplicates` (`05_cleanup_scan.sh`) was the one remaining gap:
+Phase 26's own PR note explicitly flagged it as out of scope, since only `06`'s report-*parsing*
+logic (`delete_duplicates.dart`) had a Dart port — no Dart module actually invoked `czkawka_cli` to
+*produce* a scan report. This PR ports that invocation (`lib/src/duplicate_scan.dart`) and wires it
+in, closing gap 1 of #103's five gaps (gaps 2-5 — macOS/Windows verification, docs/CI, Bash
+retirement — remain open, correctly sequenced after this one per #76's own roadmap).
+
+**ImageMagick/blur-scan decision (flagged explicitly per this task's own brief, matching Phase 0c's
+`stitch_metadata.dart` precedent): option (b) chosen — blur-scan is NOT ported, and `docker/tools
+/Dockerfile` is NOT touched.** `RUN_BLUR_SCAN` isn't consumed by any Dart module, UI, or report
+parser today — it's operator-facing-only output (`blurry_images.txt`), and adding ImageMagick would
+expand the tools image's multi-arch (amd64+arm64) surface for a feature nothing downstream depends
+on. Blur-scan capability is not silently dropped: `scripts/05_cleanup_scan.sh` (`RUN_BLUR_SCAN=1` by
+default) remains in the repo, untouched and fully functional — an operator who wants blur detection
+runs it directly. `runScanDuplicatesStep` says so explicitly in its own log output, not just in code
+comments, so this isn't a silent capability loss from a human's point of view either.
+
+**Design decision: report files staged under `$HD_PATH`, then copied to the real report directory.**
+`ToolsContainer` bind-mounts exactly one host directory (`hostMountRoot`). `$CLEANING_STAGING` is
+always under `$HD_PATH`, but `$REPORT_DIR` defaults to `$HOME/czkawka_reports` — not under `$HD_PATH`
+in the common case — so `czkawka_cli -f <report-path>` run inside the container has no way to reach
+it directly. Rather than widen `ToolsContainer` to support multiple bind mounts (a real option, but
+a structural change to shared infrastructure only this one consumer needs), `DuplicateScanRunner.run`
+has `czkawka_cli` write its `-f` report into a small, hidden staging directory it creates directly
+under `$HD_PATH` (`.duplicate_scan_tmp`) — inside the one mount already available — then reads it
+directly via plain `dart:io` (a bind mount is the same filesystem viewed from two places, not a
+copy, so no `docker exec cat` round-trip is needed) and copies the content to the real `$REPORT_DIR`
+location before deleting the temp directory in a `finally` block, success or failure.
+
+**Real discovery during parity verification: `czkawka_cli` needs a writable `$HOME`.** Manually
+exercising the real `czkawka_cli` binary (extracted from `media-pipeline-tools:local` via `docker
+cp`, run natively on the host) against a container started with `--user <host-uid>:<host-gid>` — the
+exact override `ToolsContainer.start()` applies (Phase 3, #76) — surfaced a real bug this port had to
+route around: with no `$HOME` set (the arbitrary host uid has no matching `/etc/passwd` entry, so the
+default `$HOME` is `/`, unwritable by that uid), `czkawka_cli` panics writing its cache database and
+exits `101` — the exact "genuine crash" code this module's own exit-code classification exists to
+catch. Verified empirically: the same `dup` scan against real duplicate files panics (exit 101, no
+report written) with `$HOME` unset, and succeeds (exit 11, real report written) once `$HOME` points
+at a writable directory. Fixed by having every scan invocation pass `env HOME=<container-side temp
+dir>` ahead of `czkawka_cli`, reusing the same temp directory the report-staging decision above
+already needs — no extra directory/mount required. None of the other four `ToolsContainer` consumers
+needed this; they don't maintain a persistent cache database the way `czkawka_cli` does. This is a
+genuine, previously-unknown gap in Phase 3's `--user` override, surfaced only because this port
+actually exercised `czkawka_cli` under it for the first time — flagged loudly here since a future
+consumer with similar cache/state needs should expect the same failure mode.
+
+**Exit-code classification: preserved exactly, not re-derived.** `isCzkawkaScanExitFatal` is a
+direct port of `run_czkawka_scan()`'s hard-won denylist-of-safe-codes logic (issue #81/PR #83,
+refined by the Phase 16 review-fix pass): only `0` and `11` (czkawka's fixed found-duplicates
+sentinel, not a variable count) are non-fatal: everything else — `101`, `126`/`127`, every `128+N`
+signal-death code, and any other code — aborts. The Bash script's own `PIPESTATUS`/`tee` plumbing has
+no Dart equivalent: `ToolsContainer.exec` (`docker exec`, no shell pipe) returns `czkawka_cli`'s real
+exit code directly, so there's no pipe to lose information through — only the actual safety-relevant
+classification needed porting, not the bash-specific mechanism for observing it.
+
+**Parity verification (`test/duplicate_scan_test.dart`):**
+- **Exit-code classification, matching issue #81/#83's own test coverage exactly** (`0`, `11`, `101`,
+  `126`, `127`, `137`, `139`, plus one arbitrary other code, `55`): one group asserts
+  `isCzkawkaScanExitFatal` directly; a second group runs the real, untouched `05_cleanup_scan.sh`
+  with a fake `czkawka_cli` that unconditionally exits each code, and asserts the script's own
+  abort-vs-reach-summary behavior agrees exactly with `isCzkawkaScanExitFatal`'s verdict for every
+  code — a genuine Bash-vs-Dart cross-check, not just the Dart function tested in isolation.
+- **Fake-`ToolsContainer` unit tests** (no real Docker needed, mirroring `tools_container_test.dart`'s
+  own fake-runner precedent): prove `runSingleCzkawkaScan` throws `CzkawkaScanFailedException` on a
+  fatal exit code without ever misreporting it as found-duplicates; prove the `env HOME=...` fix is
+  actually present in the real exec arguments; prove `DuplicateScanRunner.run` throws
+  `CleaningStagingNotFoundException` without ever touching the container when staging is missing.
+- **Real end-to-end parity, real fixtures, real Docker (`docker/tools/README.md`'s own precedent for
+  what "real" means here):** seeds two independent, identically-shaped fixture roots with a genuine
+  byte-identical duplicate pair; runs `DuplicateScanRunner.run` via a real `ToolsContainer` session on
+  one, and the real `05_cleanup_scan.sh` — driven by the *exact same* `czkawka_cli` binary, extracted
+  from the image via `docker cp` and run natively on the host (no separately-installed host binary is
+  assumed to exist) — on the other. Cross-checks the found-group counts for all three scan kinds
+  (image/video/dup) computed independently on each side agree exactly, and that both report files
+  reference the same duplicate filenames.
+- **Wiring-level test** in `test/pipeline_step_actions_test.dart` (this repo's established split
+  between module-logic tests and `PipelineRunner`-driven wiring tests): drives `scan-duplicates`
+  through the real `buildPipelineSteps()`/`PipelineRunner` path against a real `ToolsContainer`,
+  proving the step definition itself is correctly wired, not just the underlying module.
+
+**`scan-duplicates` step definition:** `command` → `dartAction: runScanDuplicatesStep`;
+`requiredTools` changed from `['czkawka_cli', 'ffmpeg', 'ffprobe', 'convert']` to `['docker']` (only
+`czkawka_cli` is used now, and it runs inside the container). `risk` unchanged
+(`PipelineRisk.reviewRequired`) — this step extracts/writes report files but has no confirm-gate
+split, matching `stitch-metadata`'s precedent. Not marked `linuxOnly` (it was never OS-restricted
+before this PR and is part of the automatic guided-run chain, same reasoning `stitch-metadata`'s
+Phase 26 entry documents).
+
+**Existing test updated:** none required updating (no prior test asserted on `scan-duplicates`'s
+`command`/`requiredTools`) — one new test added in `test/pipeline_models_test.dart` asserting
+`step.command` is `null`/`step.dartAction` is non-null/`requiredTools` is `['docker']`, matching the
+Phase 26/27 precedent for every other migrated step.
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green, 366 -> 388 tests (22
+net new: 20 in `test/duplicate_scan_test.dart`, 1 in `test/pipeline_step_actions_test.dart`, 1 in
+`test/pipeline_models_test.dart`), 1 skipped (Windows-only, expected on this Linux CI environment).
+All Docker-gated groups (both new and pre-existing) actually ran against a real Docker daemon and the
+`media-pipeline-tools:local` image in this environment, not skipped.
+
+**Outcome:** Every pipeline step with a Dart port now genuinely runs it in production —
+`scan-duplicates` is the last of the seven steps issue #76 Phase 2 set out to migrate.
+`05_cleanup_scan.sh` remains in the repo, untouched, both as the documented one-release-cycle
+fallback (issue #76's Phase 7) and as the only way to run the optional blur scan. Part of #76
+(tracking issue — see roadmap, stays open) and part of #103 (status check-in issue — gaps 2-5 remain
+open), not closing either. Flagging **Cody + Astrid** review — this is a real, previously-uncovered
+production execution path for a tool that scans real personal media.
