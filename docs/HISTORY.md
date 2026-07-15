@@ -1459,6 +1459,15 @@ Linux CI environment), all real-Docker groups (including the chmod-free reruns o
 own real-container tests) actually ran against a real Docker daemon and the
 `media-pipeline-tools:local` image in this environment, not skipped.
 
+**Review addendum — visible fallback warning:** Astrid's review flagged that the "shouldn't
+happen on a real Linux/macOS host" detection-failure branches of `detectHostUserFlag()`
+(`id -u`/`id -g` erroring, producing non-numeric output, or the binary being missing entirely)
+fell back to the old baked-in-uid-10000 behavior silently — a user hitting that edge case would
+get the exact permission confusion this phase exists to eliminate, with no indication why.
+Fixed by adding a `stderr.writeln('WARNING: ...')` in those three branches only, reusing
+`stitch_metadata.dart`'s existing `WARNING: ` idiom — deliberately not added to the
+`Platform.isWindows` branch, since that fallback is expected/documented, not a hiccup.
+
 **Out of scope:** Windows UID/GID handling (explicitly deferred to #76 Phase 5, per this PR's
 task brief) — `detectHostUserFlag()` returns `null` on Windows rather than attempting a mapping
 that wouldn't mean the same thing under Docker Desktop's Linux VM. No consumer wiring changes —

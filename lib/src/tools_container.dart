@@ -570,17 +570,39 @@ class ToolsContainer {
     try {
       final uidResult = Process.runSync('id', ['-u']);
       final gidResult = Process.runSync('id', ['-g']);
-      if (uidResult.exitCode != 0 || gidResult.exitCode != 0) return null;
+      if (uidResult.exitCode != 0 || gidResult.exitCode != 0) {
+        _warnDetectionFallback('id -u/-g exited non-zero');
+        return null;
+      }
       final uid = uidResult.stdout.toString().trim();
       final gid = gidResult.stdout.toString().trim();
-      if (!_isNumericId(uid) || !_isNumericId(gid)) return null;
+      if (!_isNumericId(uid) || !_isNumericId(gid)) {
+        _warnDetectionFallback('id -u/-g produced non-numeric output');
+        return null;
+      }
       return '$uid:$gid';
-    } catch (_) {
+    } catch (e) {
       // `id` missing entirely, or any other Process.runSync failure (e.g.
       // permission to spawn processes at all) — fall back to "no
       // override", per this method's doc comment.
+      _warnDetectionFallback('failed to run id ($e)');
       return null;
     }
+  }
+
+  /// Surfaces the "shouldn't happen on a real Linux/macOS host" detection
+  /// failure to stderr, mirroring `stitch_metadata.dart`'s `WARNING: `
+  /// idiom. Without this, a host with a broken/missing `id` binary would
+  /// silently fall back to the image's baked-in uid-10000 user — reproducing
+  /// the exact permission confusion this PR exists to eliminate, with no
+  /// indication of why. Not called for the Windows branch above, since that
+  /// fallback is expected/documented, not a hiccup.
+  static void _warnDetectionFallback(String reason) {
+    stderr.writeln(
+      'WARNING: could not detect host UID/GID ($reason); tools container '
+      'will run as its default image user, so files it writes into '
+      'bind-mounted host directories may not be owned by your user.',
+    );
   }
 
   static final RegExp _numericIdPattern = RegExp(r'^\d+$');
