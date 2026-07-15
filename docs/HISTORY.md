@@ -1058,3 +1058,90 @@ deviation where none existed.
 counterpart exactly; `06`/`12`/`13`'s trash moves can no longer silently strand a file un-moved.
 Part of #76 and #77; not closing either. PR flags Cody + Astrid review as required — this changes
 safety-critical move behavior across three of the four already-reviewed Phase 0b ports.
+
+## Phase 20 — Container-orchestration plumbing: `ToolsContainer`, start of #76 Phase 2 (2026-07-15)
+
+**Context:** Shared Phase 0 (drive detection + all four confirm-gated destructive scripts +
+metadata stitching) and Phase 1 (the `media-pipeline-tools` Docker image, PR #80) are both
+complete. This is the first PR of Phase 2 — "wire Dart orchestration to the container" — and is
+scoped to infrastructure only, per this issue's own phase breakdown: build the plumbing that
+manages a long-lived tools container and execs commands into it, without yet rewiring any of the
+five existing ported logic modules (`drive_detection.dart`, `delete_duplicates.dart`,
+`clean_takeout_duplicates.dart`, `dedupe_live_photos.dart`, `stitch_metadata.dart`) to use it.
+Each of those still shells out to the host binary directly via its own existing overridable seam
+(`exiftoolRunner`, the `$FFPROBE_BIN`-style override, `sha256sum`, etc.) — that consumer wiring is
+deferred to subsequent Phase 2 PRs, one consumer at a time, matching how Phase 0b ported one
+script at a time.
+
+**Added:** `lib/src/tools_container.dart`'s `ToolsContainer` class:
+- **Start:** `docker run -d --rm --init --label media-pipeline.tools-session=<id> -v
+  <hostMountRoot>:<containerMountPath> <image> sleep infinity`. `docker/tools/Dockerfile`'s own
+  `CMD` (`["bash"]`, no `ENTRYPOINT`) would exit immediately under a detached, non-TTY `docker
+  run` — rather than modify the Dockerfile (Phase 1 already shipped, reused unmodified here),
+  `start()` overrides the container's command at the `docker run` invocation itself, a standard,
+  supported Docker idiom for a long-lived exec target. `--init` was added after test development
+  surfaced a real bug (see "Pivots" below).
+- **Exec:** `docker exec <container-id> <args...>`, returning the real `ProcessResult` `docker
+  exec` produced — the same shape `Process.run` returns, so a later consumer-wiring PR can swap a
+  direct `Process.run(tool, args)` host call for `container.exec([tool, ...args])` with no shape
+  change at the call site.
+- **Stop:** `docker stop <id>` then an explicit `docker rm -f <id>` (see "Pivots" below for why
+  `--rm`'s automatic daemon-side removal alone wasn't relied on). Idempotent and never throws on
+  a failed underlying `docker` call — a container that's already gone is the success case.
+  `ToolsContainer.withSession()` wraps `start`/`stop` in a `try`/`finally` so a thrown exception
+  from the caller's own callback can never skip cleanup; every started container also carries a
+  `media-pipeline.tools-session` label so any orphan left behind by an uncatchable `SIGKILL` (the
+  one leak path no userspace process can close) can still be found and reaped independently.
+- **Path translation:** `hostToContainerPath`/`containerToHostPath` — a pure prefix-rewrite
+  between a host absolute path under `hostMountRoot` and its container-side path under
+  `containerMountPath` (`/data` by default), and the reverse. Per this repo's Safety Rules, a
+  path outside the mounted root — including one that merely shares the root as a *string* prefix
+  without a real `/`-boundary (e.g. `/mnt/target_drive2/...` against a root of
+  `/mnt/target_drive`) — throws `ArgumentError` rather than being silently mistranslated.
+  `containerToHostPath` is provided as symmetric plumbing (documented as not yet needed by any
+  wired consumer) for a later PR that needs to translate a tool's own path-echoing error output
+  back to a host path for a user-facing message.
+
+**Windows-style host paths and Docker Desktop's different bind-mount syntax are explicitly out of
+scope for this PR** — that's Phase 4/5 of this issue (macOS/Windows end-to-end verification),
+which this repo's own real-machine test precedent (`test/drive_detection_test.dart`'s
+`Platform.isLinux`-gated group) already treats as separate, platform-gated work; this PR's own
+Docker-backed tests are gated the same way.
+
+**Verification:** `test/tools_container_test.dart` — pure path-translation unit tests (round-trip,
+spaces, non-English characters, the outside-root and string-prefix-collision rejection cases);
+fake-docker-runner lifecycle tests exercising exact `docker run`/`exec`/`stop` argument shapes and
+every error path (non-zero exit, empty container ID, double-start, exec-before-start, idempotent
+stop, `withSession`'s cleanup-on-throw guarantee) without needing a real Docker daemon; and a
+real-Docker group, gated on a synchronous `docker version` + `docker image inspect
+media-pipeline-tools:local` availability check (mirroring `drive_detection_test.dart`'s
+`Platform.isLinux` skip pattern) so a CI run without Docker visibly skips rather than silently
+passing. Docker was available in this environment (the `media-pipeline-tools:local` image built
+locally from `docker/tools/Dockerfile` per its own README), so the real-Docker group actually ran:
+`exiftool -ver` inside the container returned `12.57`, matching the pinned version in
+`docker/tools/README.md`; the container was confirmed actually running via a real `docker inspect`
+call after `start()` and actually gone after `stop()`; a file written on the host was read back
+through its translated container path via a real `docker exec cat`; and `exec()` into an
+out-of-band-killed container failed rather than silently succeeding. A `docker ps -a --filter
+label=media-pipeline.tools-session` check after the full suite confirmed zero leaked containers.
+`flutter analyze`: no issues. `flutter test`: full suite green (323 tests).
+
+**Pivots:** Writing the "container is actually gone after `stop()`" real-Docker test caught a real
+bug before it shipped: `sleep infinity` run as a container's PID 1 with no init/shell wrapper gets
+Linux's special PID-1 signal semantics, where a signal with no explicitly installed handler is
+*dropped* rather than getting its normal default action — so `docker stop`'s SIGTERM was silently
+falling through to the full ~10s grace-period timeout before SIGKILL on every single call
+(confirmed by timing: real-Docker tests initially took ~40s total), and even after that, the
+`--rm`-triggered removal raced with a `docker inspect` issued immediately after `stop()` returned
+often enough to fail the test outright. Fixed by adding `--init` to `docker run` (a minimal init
+that correctly forwards SIGTERM to `sleep infinity` with normal, non-PID-1 semantics) and having
+`stop()` issue an explicit, synchronous `docker rm -f` rather than relying solely on `--rm`'s
+asynchronous daemon-side cleanup — real-Docker test time dropped to ~1s total after the fix, with
+no further flakiness across repeated runs.
+
+**Outcome:** The container-orchestration plumbing this issue's Phase 2 needs now exists,
+independently verified against a real Docker daemon and container, but nothing in `lib/**`
+consumes it yet. Part of #76, not closing it — this issue stays open until the remaining Phase 2
+consumer-wiring PRs and Phases 3-7 land. PR flags **Cody + Astrid** review as required: this is new
+infrastructure everything else in #76's Design A will eventually route real personal-media
+operations through, even though this PR itself touches no destructive path.
