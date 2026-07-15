@@ -1145,3 +1145,67 @@ consumes it yet. Part of #76, not closing it — this issue stays open until the
 consumer-wiring PRs and Phases 3-7 land. PR flags **Cody + Astrid** review as required: this is new
 infrastructure everything else in #76's Design A will eventually route real personal-media
 operations through, even though this PR itself touches no destructive path.
+
+## Phase 21 — First real consumer migration: dedupe-live-photos routes `ffprobe` through `ToolsContainer` (2026-07-15)
+
+**Context:** #76 Phase 2 (container wiring) has plumbing (`ToolsContainer`, PR #93) but no real
+consumer yet. `lib/src/dedupe_live_photos.dart` (Phase 0b port, PR #88) was picked as the first
+migration: one external tool (`ffprobe`), no archive/multi-file complexity, and its own
+Bash-vs-Dart parity test already isolates the decision logic from the invocation mechanism.
+
+**Decisions:**
+- Added `containerFfprobeDurationReader({required ToolsContainer container, String ffprobeBin})`
+  — the sanctioned production `VideoDurationReader`: translates the host video path via
+  `ToolsContainer.hostToContainerPath` before every `container.exec(['ffprobe', ...])` call, same
+  success/failure mapping as the host-based reader (non-zero exit or empty stdout -> `null`).
+- **Hard cutover, not a fallback pair.** `LivePhotoDedupeCleaner.durationReader` is now a
+  *required* constructor parameter — the implicit `?? ffprobeDurationReader()` host-`Process.run`
+  default was removed. This repo's target users already run Docker (a hard requirement for
+  Immich itself), so there's no real deployment scenario needing a silent host fallback; a
+  fallback default would only invite an accidental bypass of the container path (and its
+  path-traversal-safe boundary check) by omission. `ffprobeDurationReader` (host) is kept, but
+  only as a lower-ceremony way for a test to exercise the decision logic without a container —
+  it is no longer reachable by omission.
+- **Parity test decoupled from the invocation mechanism.** Before this change, the parity test's
+  Dart side called `ffprobeDurationReader(ffprobeBin: fakeFfprobe.path)` — exercising the *host*
+  `Process.run` seam against a fake binary. Standing up a real container with a stubbed `ffprobe`
+  baked into the pinned image just for this one test would have been high-ceremony for a test
+  whose actual job is `evaluate_pair` decision-logic parity, not container-exec mechanics.
+  Instead, `test/dedupe_live_photos_test.dart` now has a small Dart-native
+  `_fakeDurationReaderFromMarkerFile` that replicates the same marker-file protocol
+  (`DURATION=<n>` / `UNKNOWN`) directly, with zero process/container involvement — the Bash-vs-Dart
+  comparison stays meaningful (identical fixtures, identical protocol) while staying decoupled
+  from *how* the real production seam fetches the duration string.
+- **Real end-to-end coverage added separately.** A new Docker-gated test group
+  ("ffprobe via a real ToolsContainer") starts a real `ToolsContainer`, uses the pinned image's
+  own `ffmpeg` to generate a genuine 2-second synthetic video onto the bind-mounted host
+  directory (rather than a checked-in fixture), then calls `containerFfprobeDurationReader` with
+  the *host* path and confirms the full path — host path -> container path translation -> real
+  `ffprobe` exec -> `evaluateVideoDuration` parsing it as `verified` — genuinely works. A second
+  case confirms a missing file maps to `null`. Both skip gracefully (matching
+  `test/tools_container_test.dart`'s pattern) when Docker/the image aren't available.
+
+**Preserved unchanged:** the duration-then-timestamp-fallback priority order, the `<=5s`
+threshold, and the safety-critical "a known-too-long duration must never fall through to the
+timestamp fallback" regression test — none of `evaluate_pair`'s decision logic changed, only how
+`ffprobe`'s raw output gets fetched.
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green (331 tests),
+including the new real-container tests, which actually ran (Docker + `media-pipeline-tools:local`
+were available in this environment) rather than skipping.
+
+**Pivots:** The real-container test initially failed with `Permission denied` writing the
+synthetic video into the bind-mounted temp directory — the image runs as a fixed non-root UID
+(`tools`, uid 10000; `docker/tools/Dockerfile`) that doesn't match the host test-runner's UID.
+Real UID/GID mapping is explicitly future work (#76 Phase 3); as a test-only workaround, the
+fixture temp directory is `chmod 0777`'d before the container starts, scoped to this test's own
+fixture and touching nothing in `lib/`/`docker/`.
+
+**Outcome:** `dedupe_live_photos.dart` now has a sanctioned, container-routed production path for
+`ffprobe`, proven against a real Docker daemon end-to-end. Still not wired into
+`pipeline_models.dart`/`media_pipeline_app.dart` — that remains later work. Sets the pattern
+(container-exec seam + parity test decoupled from invocation mechanism + real Docker-gated e2e
+test) for the remaining Phase 2 consumer migrations (`stitch_metadata.dart`,
+`clean_takeout_duplicates.dart`, `drive_detection.dart`, `delete_duplicates.dart`). Part of #76,
+not closing it. Flagging **Cody + Astrid** review as required — first real consumer migration,
+sets the pattern for the rest.
