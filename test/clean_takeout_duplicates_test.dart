@@ -380,8 +380,9 @@ void main() {
     });
 
     test(
-      'confirm mode never clobbers an existing trash destination '
-      '(mv -n semantics)',
+      'confirm mode never leaves a verified duplicate un-moved on '
+      "collision: a numbered suffix is used instead, matching Bash's "
+      'unique_destination()',
       () async {
         final canonical = File('$googleFotosDir/2024/IMG_0001.HEIC');
         final duplicate = File(
@@ -408,13 +409,23 @@ void main() {
         );
 
         final outcome = summary.yearFolders.single.candidates.single;
-        expect(outcome.action, TakeoutDuplicateAction.skippedExisting);
+        expect(outcome.action, TakeoutDuplicateAction.movedWithSuffix);
+        // The suffixed destination is `<dst-without-ext>_1<ext>`.
+        final expectedSuffixedDst =
+            '${dst.substring(0, dst.length - 5)}_1'
+            '${dst.substring(dst.length - 5)}';
+        expect(outcome.destinationPath, expectedSuffixedDst);
         expect(
           await duplicate.exists(),
-          isTrue,
-          reason: 'source stays put on collision',
+          isFalse,
+          reason: 'source is always moved, never left in place, matching '
+              "Bash's guarantee that a move into the trash always succeeds",
         );
         expect(await File(dst).readAsBytes(), 'already-there'.codeUnits);
+        expect(
+          await File(expectedSuffixedDst).readAsBytes(),
+          'same-bytes'.codeUnits,
+        );
       },
     );
 
