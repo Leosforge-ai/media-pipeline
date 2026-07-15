@@ -126,6 +126,73 @@ void main() {
       );
     });
 
+    test(
+      'rejects a `..` traversal that escapes the mount root, even though '
+      'it string-prefix-matches before normalization '
+      '(Cody/Astrid PR #93 review finding)',
+      () {
+        // Reproduces the exact case Cody flagged: this string is a raw
+        // prefix match on the mount root before normalization
+        // (`/mnt/target_drive/../etc/passwd` literally starts with
+        // "/mnt/target_drive"), but resolves to `/etc/passwd` — outside the
+        // root — once `..` is actually processed. Must be rejected, not
+        // translated to something like `/data/../etc/passwd`.
+        expect(
+          () => container.hostToContainerPath(
+            '/mnt/target_drive/../etc/passwd',
+          ),
+          throwsArgumentError,
+        );
+      },
+    );
+
+    test(
+      'does not blanket-reject every path containing `..` — one that '
+      'normalizes to a location still safely inside the mount root '
+      'succeeds and resolves correctly',
+      () {
+        expect(
+          container.hostToContainerPath('/mnt/target_drive/foo/../bar'),
+          '/data/bar',
+        );
+      },
+    );
+
+    test(
+      'rejects a `..`-laden path that escapes the root via multiple '
+      'traversal segments',
+      () {
+        expect(
+          () => container.hostToContainerPath(
+            '/mnt/target_drive/a/../../other_drive/secret.jpg',
+          ),
+          throwsArgumentError,
+        );
+      },
+    );
+
+    test(
+      'containerToHostPath rejects the equivalent `..` traversal on the '
+      'container side',
+      () {
+        expect(
+          () => container.containerToHostPath('/data/../etc/passwd'),
+          throwsArgumentError,
+        );
+      },
+    );
+
+    test(
+      'containerToHostPath resolves a `..` that stays inside the mount '
+      'point instead of blanket-rejecting it',
+      () {
+        expect(
+          container.containerToHostPath('/data/foo/../bar'),
+          '/mnt/target_drive/bar',
+        );
+      },
+    );
+
     test('containerToHostPath translates the mount point itself', () {
       expect(container.containerToHostPath('/data'), '/mnt/target_drive');
     });

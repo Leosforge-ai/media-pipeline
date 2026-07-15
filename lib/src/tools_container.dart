@@ -80,23 +80,19 @@ class ToolsContainer {
     this.dockerBin = 'docker',
     DockerProcessRunner? runner,
   }) : runner = runner ?? _defaultRunner(dockerBin),
-       _normalizedHostRoot = _stripTrailingSlash(hostMountRoot),
-       _normalizedContainerRoot = _stripTrailingSlash(containerMountPath) {
-    if (!hostMountRoot.startsWith('/')) {
-      throw ArgumentError.value(
-        hostMountRoot,
-        'hostMountRoot',
-        'must be an absolute path',
-      );
-    }
-    if (!containerMountPath.startsWith('/')) {
-      throw ArgumentError.value(
-        containerMountPath,
-        'containerMountPath',
-        'must be an absolute path',
-      );
-    }
-  }
+       // Normalized (not just trailing-slash-stripped) up front, so a root
+       // itself constructed with `.`/`..` segments doesn't skew every later
+       // boundary check — see [_normalizeAbsolutePath]'s doc comment. This
+       // also performs (and throws on failure of) the "must be absolute"
+       // validation, so no separate check is needed in the body below.
+       _normalizedHostRoot = _normalizeAbsolutePath(
+         hostMountRoot,
+         argumentName: 'hostMountRoot',
+       ),
+       _normalizedContainerRoot = _normalizeAbsolutePath(
+         containerMountPath,
+         argumentName: 'containerMountPath',
+       );
 
   /// The host directory bind-mounted into the container at
   /// [containerMountPath]. Typically the target media drive root.
@@ -297,10 +293,24 @@ class ToolsContainer {
   /// shares [hostMountRoot] as a string *prefix* without a `/` boundary
   /// (e.g. `/mnt/target_drive2/...` against a root of `/mnt/target_drive`)
   /// is correctly rejected as outside the root, not accidentally accepted.
+  ///
+  /// [hostPath] is normalized (`.`/`..` segments resolved against a
+  /// `/`-rooted walk — see [_normalizeAbsolutePath]) *before* the boundary
+  /// check runs, so a traversal attempt like
+  /// `/mnt/target_drive/../etc/passwd` (which is still a raw string-prefix
+  /// match on `hostMountRoot` before normalization) is correctly evaluated
+  /// against what it actually resolves to (`/etc/passwd`, outside the root
+  /// — rejected) rather than against its unresolved literal text. A `..`
+  /// that stays inside the root after normalization (e.g.
+  /// `/mnt/target_drive/foo/../bar` -> `/mnt/target_drive/bar`) is not
+  /// blanket-rejected just for containing `..` — only the actually-resolved
+  /// destination is what's checked, matching how a real filesystem/container
+  /// would resolve it.
   String hostToContainerPath(String hostPath) {
-    if (hostPath == _normalizedHostRoot) return _normalizedContainerRoot;
+    final normalized = _normalizeAbsolutePath(hostPath, argumentName: 'hostPath');
+    if (normalized == _normalizedHostRoot) return _normalizedContainerRoot;
     final prefix = '$_normalizedHostRoot/';
-    if (!hostPath.startsWith(prefix)) {
+    if (!normalized.startsWith(prefix)) {
       throw ArgumentError.value(
         hostPath,
         'hostPath',
@@ -308,7 +318,7 @@ class ToolsContainer {
             'translated to a container path',
       );
     }
-    final relative = hostPath.substring(prefix.length);
+    final relative = normalized.substring(prefix.length);
     return '$_normalizedContainerRoot/$relative';
   }
 
@@ -333,10 +343,17 @@ class ToolsContainer {
   /// Same fail-loud contract as [hostToContainerPath]: throws
   /// [ArgumentError] if [containerPath] is not [containerMountPath] itself
   /// or strictly under it.
+  ///
+  /// Same normalize-before-boundary-check contract as
+  /// [hostToContainerPath] — see its doc comment.
   String containerToHostPath(String containerPath) {
-    if (containerPath == _normalizedContainerRoot) return _normalizedHostRoot;
+    final normalized = _normalizeAbsolutePath(
+      containerPath,
+      argumentName: 'containerPath',
+    );
+    if (normalized == _normalizedContainerRoot) return _normalizedHostRoot;
     final prefix = '$_normalizedContainerRoot/';
-    if (!containerPath.startsWith(prefix)) {
+    if (!normalized.startsWith(prefix)) {
       throw ArgumentError.value(
         containerPath,
         'containerPath',
@@ -344,14 +361,57 @@ class ToolsContainer {
             'cannot be translated to a host path',
       );
     }
-    final relative = containerPath.substring(prefix.length);
+    final relative = normalized.substring(prefix.length);
     return '$_normalizedHostRoot/$relative';
   }
 
-  static String _stripTrailingSlash(String path) {
-    return path.endsWith('/') && path.length > 1
-        ? path.substring(0, path.length - 1)
-        : path;
+  /// Resolves `.`/`..` segments in an absolute [path] against a `/`-rooted
+  /// walk, without touching the real filesystem — a pure string operation
+  /// (mirroring `stitch_metadata.dart`'s `_normalizeSegments`, which solves
+  /// the identical "validate a path before trusting it as a boundary check"
+  /// problem for archive-extraction path-traversal guarding). Used by
+  /// [hostToContainerPath]/[containerToHostPath] to normalize *before*
+  /// their prefix/boundary check runs, so a traversal attempt like
+  /// `<root>/../etc/passwd` is evaluated against what it actually resolves
+  /// to, not its unresolved literal text (Cody/Astrid PR #93 review
+  /// finding: the boundary check alone was insufficient — a `..`-laden path
+  /// can pass a raw string-prefix check while still resolving outside the
+  /// mounted root once a real filesystem/container processes it).
+  ///
+  /// A `..` that would walk above the filesystem root (e.g. `/../etc`, or
+  /// more `..` segments than preceding real segments) collapses to `/`
+  /// rather than underflowing, matching how `..` above `/` behaves on a
+  /// real POSIX filesystem (`/` has no parent, so `cd ..` from `/` stays at
+  /// `/`) — this still leaves the boundary check downstream to correctly
+  /// reject it as outside the mount root; it never throws here itself, so
+  /// every rejection in this class comes from the single, already-tested
+  /// [ArgumentError] site in [hostToContainerPath]/[containerToHostPath].
+  ///
+  /// Throws [ArgumentError] (named per [argumentName]) if [path] is not
+  /// itself absolute — this function is only ever called with the
+  /// already-absolute-required inputs to [hostToContainerPath]/
+  /// [containerToHostPath].
+  static String _normalizeAbsolutePath(
+    String path, {
+    required String argumentName,
+  }) {
+    if (!path.startsWith('/')) {
+      throw ArgumentError.value(
+        path,
+        argumentName,
+        'must be an absolute path',
+      );
+    }
+    final stack = <String>[];
+    for (final segment in path.split('/')) {
+      if (segment.isEmpty || segment == '.') continue;
+      if (segment == '..') {
+        if (stack.isNotEmpty) stack.removeLast();
+        continue;
+      }
+      stack.add(segment);
+    }
+    return '/${stack.join('/')}';
   }
 
   static final Random _sessionRandom = Random();
