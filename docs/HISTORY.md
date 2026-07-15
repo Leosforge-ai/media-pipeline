@@ -1558,3 +1558,164 @@ identical external behavior to the existing subprocess path, ready for a future 
 real step onto. Part of #76 (tracking issue — see roadmap, stays open), not the whole issue.
 Flagging **Cody + Astrid** review as required, per this series' established practice — this
 touches the shared execution path every future step migration will build on.
+
+## Phase 26 — First real step migrations: 4 SAFE/dry-run steps wired to `dartAction`, plus the stuck-UI-state fix (2026-07-15)
+
+**Context:** Phase 25 (PR #99) built the `PipelineStep.dartAction`/`PipelineRunner.run()` plumbing
+but changed zero real steps — every step still shelled out to `bash`/`python3`. This phase does
+the actual "swap Bash for Dart in production" step Astrid's Phase 20 risk list called out,
+migrating exactly the four SAFE/non-confirm-gated steps in scope: `delete-dry-run` ->
+`delete_duplicates.dart`, `restore-dry-run` -> `restore_from_trash.dart`,
+`immich-takeout-duplicate-dry-run` -> `clean_takeout_duplicates.dart`, and `stitch-metadata` ->
+`stitch_metadata.dart` (`PipelineRisk.reviewRequired`, not `safe`, but in scope per this PR's own
+brief since it isn't confirm-gated). `delete-confirm`/`restore-confirm`
+(`PipelineRisk.confirmRequired`) are untouched, deferred to a dedicated future PR with extra
+review, per standing project policy on confirm-gated destructive steps.
+
+**`scan-duplicates` (`05_cleanup_scan.sh`) confirmed out of scope, not skipped by oversight:**
+checked `delete_duplicates.dart`'s own module doc comment and Phase 2's migration-completion note
+— only `06`'s report-parsing/dry-run/confirm logic was ever ported to Dart; `05`'s own Czkawka
+scan invocation (the actual `czkawka_cli` duplicate-scan command) has no Dart port at all. Porting
+it would be inventing a new port outside this PR's stated scope (wiring already-ported modules),
+so `scan-duplicates` stays on `command`.
+
+**Wiring functions live in `pipeline_models.dart` itself** (`runDeleteDryRunStep`,
+`runRestoreDryRunStep`, `runImmichTakeoutDuplicateDryRunStep`, `runStitchMetadataStep`), each a
+top-level function matching the `PipelineDartAction` typedef exactly, referenced from
+`buildPipelineSteps()` as plain tear-offs — kept the step list `const` (a top-level function
+reference is a valid Dart compile-time constant), preserving the file's existing style. A separate
+`pipeline_step_actions.dart` file was considered (cleaner separation of concerns) but would have
+required either a two-file mutual import cycle with `pipeline_models.dart` (technically legal in
+Dart but an unusual pattern for this codebase) or moving `PipelineStep`/`buildPipelineSteps()`
+itself, judged unnecessary churn for four functions.
+
+**Parity verification, per module:**
+- `delete-dry-run`/`restore-dry-run`: `test/app_driven_simulation_test.dart` (pre-existing,
+  unmodified by this PR) already drives `buildPipelineSteps()`'s `delete-dry-run` step through a
+  real `PipelineRunner`, feeds its output to `duplicate_report.dart`'s real
+  `parseDuplicateDryRunOutput`, runs the still-Bash `delete-confirm --confirm` script against the
+  same fixture, and then re-runs `restore-dry-run` against the resulting real `media_trash` layout
+  — proving this PR's Dart `delete-dry-run`/`restore-dry-run` path conventions
+  (`trashDestinationPath`'s absolute-path-minus-leading-slash convention) exactly match what the
+  still-Bash confirm script actually writes to disk, not just that the two sides look similar in
+  isolation. This test passed unmodified once the wiring's output format matched (see the bug
+  found below).
+- `immich-takeout-duplicate-dry-run`/`stitch-metadata`: new `test/pipeline_step_actions_test.dart`,
+  Docker-gated (mirrors `test/tools_container_test.dart`'s `_dockerAvailable`/`_toolsImageAvailable`
+  pattern), drives each step through a real `PipelineRunner` against a real `ToolsContainer` and
+  real fixture files (a genuine basename+size+hash-matching duplicate pair for the former; a real
+  `zip`-built archive with a JSON sidecar for the latter), asserting on the real rendered output
+  and real filesystem side effects (staged file exists, archive deleted, nothing moved in dry-run).
+
+**Bug found during parity verification (fixed before this PR was considered done):** the first
+draft of all three dry-run wiring functions used two separate helpers — a `log()` that only called
+`onLog` live, and a `emit()` that both wrote to a result-accumulating `buffer` and called `log()`
+— with the very first "DRY RUN MODE: ..." line going through `log()` only. Since
+`media_pipeline_app.dart`'s completion handler sets `StepRunState.log` to `result.output` (an
+*overwrite*, not an append, of whatever the live `onLog` stream had already accumulated — see
+`_runSelectedStep`), that first line silently vanished from the final displayed log even though it
+had appeared live for an instant. Caught by `test/app_driven_simulation_test.dart`'s existing
+`expect(dryRun.output, contains('DRY RUN MODE'))` assertion, which failed until every line —
+including the very first — went through the same `buffer`-writing `emit`. Fixed by defining `emit`
+before any output is produced and using it exclusively, in all three affected functions.
+
+**Stuck-UI-state fix (Cody's PR #99 review finding, required by this PR's brief):**
+`media_pipeline_app.dart`'s two `runner.run(...)`/`guidedRunController.run(...)` call sites
+(`_runSelectedStep`, `_runNextGuidedSegment`) never wrapped the `await` in a `try`/`catch`. Before
+this PR, no real step used `dartAction`, so an uncaught throw from that path was unreachable in
+practice; `pipeline_runner_test.dart`'s own "runner propagates an uncaught throw..." test (added in
+Phase 25) documents that `PipelineRunner.run()` *deliberately* does not swallow a `dartAction`
+throw into a fake result — so once real `dartAction`s existed that could genuinely throw (this
+PR's `restore-dry-run` on a missing `media_trash`, or any container step if Docker isn't running),
+an uncaught throw would leave `_runningStepId` permanently non-null, disabling that step's (or the
+whole guided run's) controls until an app restart. Fixed at both call sites: `_runSelectedStep`
+now catches, resets `_runningStepId`, and marks the step `failed` with the error text appended to
+its log; `_runNextGuidedSegment` now catches, resets `_runningStepId`/`_guidedRunning`, marks the
+step that was running when it threw as `failed`, and synthesizes a `GuidedRunResult` with
+`GuidedRunOutcome.stepFailed` (tracking which earlier steps in the segment had already completed
+via a local list, since `GuidedRunController.run()` itself never returns on a throw) so the guided
+run's retry-from-failed-step logic (issue #51) still works correctly afterward. Two new widget
+tests (`test/dart_action_throw_widget_test.dart`) reproduce the bug with a fake throwing
+`PipelineRunner` (same construction pattern as
+`guided_run_persistence_and_retry_widget_test.dart`'s existing fakes) for both the single-step and
+guided-run call sites, proving the Run button/guided-run button are both usable again after a
+throw, not stuck.
+
+**Design decision — `dartAction` implementations mostly let exceptions propagate, not catch
+them:** per `pipeline_runner_test.dart`'s documented "propagate, don't swallow" contract, none of
+the four wiring functions wraps the underlying ported module's call in a generic try/catch — a
+`ToolsContainer` start failure (e.g. Docker not running) or any other unanticipated error
+propagates uncaught, now correctly handled by the stuck-UI-state fix above rather than by trying to
+convert every possible failure into a clean result. The one deliberate exception:
+`runRestoreDryRunStep` catches `TrashRootNotFoundException` specifically and returns a failed
+(`exitCode: 1`) `PipelineRunResult` instead of letting it propagate — this mirrors the real Bash
+script's own `set -e` non-zero-exit behavior on a missing `$MEDIA_TRASH` (a well-known, always
+possible "nothing has been trashed yet" condition, not a bug), giving parity with how a subprocess
+step would have reported the identical situation rather than routing an expected, common condition
+through the generic uncaught-throw UI path.
+
+**`ToolsContainer` lifecycle — one session per step run, not shared across steps:**
+`immich-takeout-duplicate-dry-run` and `stitch-metadata` each call `ToolsContainer.withSession`
+for the duration of that single step's run, then tear the container down. Considered and rejected
+a longer-lived, app-session-scoped container shared across steps: these are independent pipeline
+steps a human runs one at a time (never concurrently) from the step list or guided-run chain, so
+there's no real overlap window where sharing would save meaningful start/stop overhead, and a
+per-step session keeps each step's container lifecycle (and cleanup guarantee, via
+`withSession`'s own `try`/`finally`) trivially easy to reason about — no risk of one step's failure
+leaving a container state another step unexpectedly inherits.
+
+**Log visibility (Cody's PR #99 finding on `dartAction` output being structurally different from
+subprocess-captured output):** every migrated step's `onLog` receives real per-line progress/result
+text, not silence-until-done. `stitch-metadata` additionally required a small, minimal, backward-
+compatible addition to `stitch_metadata.dart` itself: `MetadataStitcher.run()` gained an optional
+`warnOverride` parameter (defaulting to the existing `fileWarningLogger`, unchanged for every
+existing caller/test) so `runStitchMetadataStep` can forward each per-file warning to `onLog` in
+addition to the warning log file — without it, warnings would only reach the real OS stderr
+(invisible to this in-process caller, unlike a subprocess's captured stderr) and a human watching
+the step would see silence where a warning actually occurred. The three dry-run steps' per-item
+result lines (Keep/Would trash, Would restore, Would move duplicate/verification-skip reasons) are
+emitted immediately after each underlying module's single atomic `run()` Future resolves, not
+truly streamed mid-computation — those ported modules return one complete result object rather
+than a callback-driven stream, and adding streaming callbacks to them was judged out of scope for
+a wiring-only PR; `stitch-metadata` (the step actually expected to run long, given real archive
+extraction) does get true live streaming via `MetadataStitcher.run()`'s existing `print` parameter.
+
+**`requiredTools` chips updated to reflect what actually runs where:** `immich-takeout-duplicate-
+dry-run`'s chip changed from `sha256sum` to `docker` (the tool now runs inside a container, not on
+the host); `stitch-metadata`'s changed from `python3, exiftool, rsync` to `docker, rsync`
+(`exiftool`/`unzip`/`tar` are container-routed; `rsync`, used only by the raw-Google-Drive merge
+step, still shells out on the host). Neither step's `linuxOnly`/OS-gating changed:
+`immich-takeout-duplicate-dry-run` already had `linuxOnly: true` from before this PR;
+`stitch-metadata` deliberately was **not** given `linuxOnly: true` even though it's now
+`ToolsContainer`-dependent, since it's part of the automatic guided-run chain and was never
+OS-restricted before this PR (the whole app already assumes POSIX-style paths via
+`PipelineSettings.defaults()`'s hardcoded `/mnt/target_drive`) — a `ToolsContainer` failure on an
+unsupported platform now surfaces as a visible failed step via the stuck-UI-state fix, rather than
+this PR inventing a new hard OS gate.
+
+**Existing tests updated (2, both were asserting on the now-null `step.command`):**
+`test/pipeline_models_test.dart`'s "dry-run cleanup does not include confirm argument" and "immich
+takeout duplicate dry-run is safe and linux only" now assert `step.command` is `null` and
+`step.dartAction` is non-null instead of inspecting `PipelineCommand.arguments` — a stronger
+guarantee than the old check (there is no argument list at all any more, so there is nothing that
+could ever carry `--confirm`).
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green, 358 -> 363 tests
+(5 net new: 2 in `test/dart_action_throw_widget_test.dart`, 3 in
+`test/pipeline_step_actions_test.dart`; 2 existing tests updated, not counted as new), 1 skipped
+(Windows-only, expected on this Linux CI environment). All Docker-gated groups (both new and
+pre-existing) actually ran against a real Docker daemon and the `media-pipeline-tools:local` image
+in this environment, not skipped. Reran the full suite twice to confirm no new flakiness from this
+PR's changes (pre-existing `tools_container_test.dart` Docker-lifecycle-under-parallel-load
+flakiness, already a known characteristic of that file, was observed and is unrelated to this PR).
+
+**Outcome:** Four SAFE/dry-run-or-non-destructive pipeline steps now genuinely run their Dart-native,
+container-routed implementations in production instead of shelling out to Bash/Python — the first
+real "swap Bash for Dart" migrations issue #76's whole Phase 0/Phase 2 investment was building
+toward. The stuck-UI-state gap Cody flagged in PR #99's review is closed for both call sites where
+it could occur. `delete-confirm`/`restore-confirm` remain untouched, on `command`, deferred to a
+dedicated future PR with extra review — no confirm-gated step's execution mechanism changed. Part
+of #76 (tracking issue — see roadmap, stays open), not the whole issue. Flagging **Cody + Astrid**
+review as required — this is the first PR where a real, human-triggerable pipeline step actually
+executes Dart-native logic instead of a subprocess, touching this repo's stated first priority
+(data-loss prevention) directly.

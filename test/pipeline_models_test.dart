@@ -13,14 +13,24 @@ void main() {
     expect(step.risk, PipelineRisk.confirmRequired);
   });
 
-  test('dry-run cleanup does not include confirm argument', () {
-    final step = buildPipelineSteps().singleWhere(
-      (step) => step.id == 'delete-dry-run',
-    );
+  test(
+    'dry-run cleanup is Dart-native (issue #76) and never a --confirm '
+    'command',
+    () {
+      final step = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'delete-dry-run',
+      );
 
-    expect(step.command!.arguments, isNot(contains('--confirm')));
-    expect(step.risk, PipelineRisk.safe);
-  });
+      // Migrated from `command` to `dartAction` (issue #76) — see
+      // `pipeline_models.dart`'s `runDeleteDryRunStep`. There is no
+      // `PipelineCommand` at all any more, so there is no argument list
+      // that could ever carry `--confirm` — a stronger guarantee than the
+      // old "the arguments list doesn't contain --confirm" check.
+      expect(step.command, isNull);
+      expect(step.dartAction, isNotNull);
+      expect(step.risk, PipelineRisk.safe);
+    },
+  );
 
   test('confirm step is blocked until dry-run succeeds', () {
     final confirm = buildPipelineSteps().singleWhere(
@@ -151,20 +161,27 @@ void main() {
     });
   });
 
-  test('immich takeout duplicate dry-run is safe and linux only', () {
-    final step = buildPipelineSteps().singleWhere(
-      (step) => step.id == 'immich-takeout-duplicate-dry-run',
-    );
+  test(
+    'immich takeout duplicate dry-run is Dart-native (issue #76), safe, '
+    'and linux only',
+    () {
+      final step = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'immich-takeout-duplicate-dry-run',
+      );
 
-    expect(step.command!.arguments, [
-      'scripts/12_clean_immich_takeout_duplicates.sh',
-    ]);
-    expect(step.command!.arguments, isNot(contains('--confirm')));
-    expect(step.risk, PipelineRisk.safe);
-    expect(step.linuxOnly, isTrue);
-    expect(step.requiredTools, contains('sha256sum'));
-    expect(step.requiresDryRunStepId, isNull);
-  });
+      // Migrated from `command` to `dartAction` (issue #76) — see
+      // `pipeline_models.dart`'s `runImmichTakeoutDuplicateDryRunStep`.
+      // `sha256sum` now runs inside a `ToolsContainer` the step starts
+      // itself, so the informational tool-requirement chip is `docker`
+      // (Docker is what's actually needed on the host), not `sha256sum`.
+      expect(step.command, isNull);
+      expect(step.dartAction, isNotNull);
+      expect(step.risk, PipelineRisk.safe);
+      expect(step.linuxOnly, isTrue);
+      expect(step.requiredTools, contains('docker'));
+      expect(step.requiresDryRunStepId, isNull);
+    },
+  );
 
   group('guided run chain', () {
     test('never includes a confirm-gated step id', () {

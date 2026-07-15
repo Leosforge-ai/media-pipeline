@@ -1271,9 +1271,21 @@ class MetadataStitcher {
   /// Runs the full pipeline against [hdPath], mirroring `main()`.
   /// [print] receives the same `==> ...` progress lines the Python script
   /// prints to stdout (optional — tests can omit it).
+  ///
+  /// [warnOverride], if given, replaces the default [fileWarningLogger]
+  /// (which only writes to [stitchWarningLogPath] and the real OS stderr —
+  /// invisible to an in-process caller, unlike a subprocess's captured
+  /// stderr). The `stitch-metadata` `PipelineStep.dartAction` wiring
+  /// (`pipeline_models.dart`'s `runStitchMetadataStep`) passes one that
+  /// also forwards each warning to the step's live `onLog` stream, so a
+  /// human watching the step in the app sees warnings the same way they'd
+  /// see them interleaved in a subprocess step's log — see that function's
+  /// doc comment. Tests that don't care about this distinction can omit it
+  /// and get the original file-plus-stderr behavior unchanged.
   Future<StitchMetadataSummary> run(
     String hdPath, {
     void Function(String)? print,
+    WarningLogger? warnOverride,
   }) async {
     final rawTakeoutZips = rawTakeoutZipsPath(hdPath);
     final takeoutExtracted = takeoutExtractedPath(hdPath);
@@ -1286,7 +1298,7 @@ class MetadataStitcher {
     final warningLog = File(stitchWarningLogPath(hdPath));
     await warningLog.parent.create(recursive: true);
     await warningLog.writeAsString('# Metadata stitching warnings\n\n');
-    final warn = fileWarningLogger(hdPath);
+    final warn = warnOverride ?? fileWarningLogger(hdPath);
 
     final archives = await _supportedArchives(rawTakeoutZips);
     if (archives.isEmpty) {
