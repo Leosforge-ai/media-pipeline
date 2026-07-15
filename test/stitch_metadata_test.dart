@@ -583,6 +583,7 @@ void main() {
 
         final stitcher = MetadataStitcher(
           exiftool: (args) async => (0, '', ''),
+          archiveExtractor: TakeoutArchiveExtractor(),
         );
         final logs = <String>[];
         final summary = await stitcher.run(hdPath, print: logs.add);

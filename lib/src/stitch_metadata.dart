@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'filesystem_ops.dart';
+import 'tools_container.dart';
 
 /// Dart port of `scripts/04_stitch_metadata.py` — Phase 0c of issue
 /// #76/#77's shared roadmap, the last piece of shared Phase 0 (drive
@@ -81,6 +82,80 @@ import 'filesystem_ops.dart';
 /// PR's body for Cody/Astrid to weigh in on whether a follow-up fix issue
 /// against the Python script is warranted — out of scope for this
 /// port-for-parity PR either way.
+///
+/// ## Design decision: all three external tools (`unzip`/`tar`/`exiftool`)
+/// route through [ToolsContainer] (Phase 2 of issue #76)
+///
+/// Following the `ffprobe` migration in `dedupe_live_photos.dart` (PR #94,
+/// the first Phase 2 consumer migration), this port's three external-tool
+/// call sites — [TakeoutArchiveExtractor]'s zip/tar listing+extraction and
+/// [applyMetadataWithExiftool]'s `exiftool` invocation — now have
+/// container-routed implementations: [containerZipLister],
+/// [containerZipExtractor], [containerTarLister], [containerTarExtractor]
+/// (bundled together for the common case by
+/// [containerTakeoutArchiveExtractor]), and [containerExiftoolRunner]. Each
+/// translates every host path it's given to its container-mounted
+/// equivalent via [ToolsContainer.hostToContainerPath] before exec'ing,
+/// exactly mirroring [containerFfprobeDurationReader]'s pattern.
+///
+/// **Hard cutover, matching PR #94's precedent.** [MetadataStitcher]'s
+/// [MetadataStitcher.exiftool] and [MetadataStitcher.archiveExtractor] are
+/// now *required* constructor parameters — there is no longer an implicit
+/// default that silently shells out to a host-installed `unzip`/`tar`/
+/// `exiftool`. Same rationale as PR #94: this repo's target users already
+/// require Docker (for Immich itself), so a "just in case" host fallback
+/// would only invite a caller to bypass the container path — and the
+/// path-translation safety net that comes with it — by omission. The
+/// host-shelling defaults ([exiftoolRunner], [TakeoutArchiveExtractor]'s own
+/// no-argument constructor, which defaults to [defaultZipLister] /
+/// [defaultZipExtractor] / [defaultTarLister] / [defaultTarExtractor]) are
+/// kept — they remain the most direct way to unit-test this module's
+/// decision logic without standing up a container.
+///
+/// **Where extraction happens, and why the host sees results immediately.**
+/// [extractArchive] creates `destDir` on the *host* filesystem before
+/// calling into [TakeoutArchiveExtractor.extract] (unchanged by this
+/// migration). Since `destDir` lives under `$HD_PATH/takeout_extracted`,
+/// and callers are expected to construct their [ToolsContainer] with
+/// `hostMountRoot` set to (an ancestor of) `$HD_PATH` — exactly like PR
+/// #94's `containerFfprobeDurationReader` expects for `$MEDIA_TRASH`/video
+/// paths — `destDir` is always inside the bind mount. The container-routed
+/// extractor translates `destDir` to its container path and runs `unzip -d`/
+/// `tar -C` against it; because the bind mount is the *same* underlying
+/// filesystem on both sides (not a copy), every file the container process
+/// writes under that path is visible to the host the moment `docker exec`
+/// returns — no explicit sync/copy step is needed, and this is verified for
+/// real (not just asserted) by this PR's Docker-gated end-to-end test (see
+/// `test/stitch_metadata_test.dart`'s "stitch metadata via a real
+/// ToolsContainer" group).
+///
+/// **How the two path-safety mechanisms compose.**
+/// [isPathTraversalSafe] validates archive *member* names against `destDir`
+/// (a pure string check: could extracting a member named `../../etc/passwd`
+/// land outside `destDir`?) — this check runs entirely in [extract], on
+/// host-domain paths, *before* the container-routed lister/extractor
+/// functions are ever invoked, and is completely unaware that a container is
+/// involved at all. Separately, [ToolsContainer.hostToContainerPath]
+/// validates that `destDir` *itself* (and the archive path) fall inside
+/// [ToolsContainer.hostMountRoot] — a check about the boundary of the bind
+/// mount, unrelated to what's inside the archive. These two checks operate
+/// on different axes (member-relative-to-destDir vs.
+/// destDir-relative-to-mount-root) and neither can substitute for or weaken
+/// the other: an archive with a path-traversal member is blocked by
+/// [isPathTraversalSafe] regardless of whether `destDir` is a legal
+/// container path at all (the member-safety loop in [extract] runs and can
+/// throw before any exec happens), and a `destDir` outside the mount root is
+/// rejected by [ToolsContainer.hostToContainerPath] regardless of whether
+/// every member inside the archive is perfectly safe (the container-routed
+/// extractor's translation call throws before building the `unzip`/`tar`
+/// argument list). Neither mechanism trusts the other to have already
+/// caught a given class of problem. This composition is exercised directly
+/// by `test/stitch_metadata_test.dart`'s "container path-safety
+/// composition" group: one test proves an unsafe archive member is still
+/// blocked pre-exec even when routed through the container lister/extractor
+/// (no `docker exec` for extraction ever happens), and another proves a
+/// `destDir` outside the container's mount root is rejected even when every
+/// archive member is individually safe.
 
 // ---------------------------------------------------------------------------
 // Path helpers (mirroring `config/pipeline_config.py`'s HD_PATH-derived
@@ -637,6 +712,144 @@ ArchiveExtractRunner defaultTarExtractor({String tarBin = 'tar'}) {
   };
 }
 
+/// Sanctioned production [ArchiveLister] for `.zip` archives (Phase 2 of
+/// issue #76 — see this file's top-level "Design decision: all three
+/// external tools ... route through [ToolsContainer]" doc comment): execs
+/// `unzip -Z1` inside [container] against the container-translated archive
+/// path. [archivePath] is a *host* path; translated via
+/// [ToolsContainer.hostToContainerPath] before exec'ing (which fails loudly
+/// if [archivePath] is outside [container]'s `hostMountRoot` — this
+/// function adds no separate check of its own).
+ArchiveLister containerZipLister({
+  required ToolsContainer container,
+  String unzipBin = 'unzip',
+}) {
+  return (String archivePath) async {
+    final containerArchivePath = container.hostToContainerPath(archivePath);
+    final result = await container.exec([unzipBin, '-Z1', containerArchivePath]);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Failed to list zip archive $archivePath: ${result.stderr}',
+      );
+    }
+    return (result.stdout as String)
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+  };
+}
+
+/// Sanctioned production [ArchiveExtractRunner] for `.zip` archives: execs
+/// `unzip -o -d <container destDir> <container archivePath>` inside
+/// [container]. Both [archivePath] and [destDir] are *host* paths,
+/// translated independently via [ToolsContainer.hostToContainerPath] before
+/// exec'ing — see this file's top-level doc comment's "How the two
+/// path-safety mechanisms compose" section for why this translation (a
+/// mount-boundary check) is a separate, non-overlapping concern from
+/// [isPathTraversalSafe]'s archive-member check, which has already run
+/// (against the host-domain [destDir]) by the time this function is called.
+/// Only ever invoked after every member has passed that check (see
+/// [TakeoutArchiveExtractor.extract]) — `-o` (overwrite without prompting)
+/// is safe here for the same reason [defaultZipExtractor] documents: this
+/// codebase treats extraction as opening onto a freshly created/cleared
+/// [destDir], not a pre-existing directory with untrusted contents.
+ArchiveExtractRunner containerZipExtractor({
+  required ToolsContainer container,
+  String unzipBin = 'unzip',
+}) {
+  return (String archivePath, String destDir) async {
+    final containerArchivePath = container.hostToContainerPath(archivePath);
+    final containerDestDir = container.hostToContainerPath(destDir);
+    final result = await container.exec([
+      unzipBin,
+      '-o',
+      '-d',
+      containerDestDir,
+      containerArchivePath,
+    ]);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Failed to extract zip archive $archivePath: ${result.stderr}',
+      );
+    }
+  };
+}
+
+/// Sanctioned production [ArchiveLister] for `.tgz`/`.tar.gz` archives:
+/// execs `tar -tzf` inside [container] against the container-translated
+/// archive path. Same host-path-in, translate-before-exec contract as
+/// [containerZipLister].
+ArchiveLister containerTarLister({
+  required ToolsContainer container,
+  String tarBin = 'tar',
+}) {
+  return (String archivePath) async {
+    final containerArchivePath = container.hostToContainerPath(archivePath);
+    final result = await container.exec([tarBin, '-tzf', containerArchivePath]);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Failed to list tar archive $archivePath: ${result.stderr}',
+      );
+    }
+    return (result.stdout as String)
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+  };
+}
+
+/// Sanctioned production [ArchiveExtractRunner] for `.tgz`/`.tar.gz`
+/// archives: execs `tar -xzf` (translated container archive path) `-C`
+/// (translated container destDir) inside [container]. Same host-path-in,
+/// translate-both-independently-before-exec contract as
+/// [containerZipExtractor].
+ArchiveExtractRunner containerTarExtractor({
+  required ToolsContainer container,
+  String tarBin = 'tar',
+}) {
+  return (String archivePath, String destDir) async {
+    final containerArchivePath = container.hostToContainerPath(archivePath);
+    final containerDestDir = container.hostToContainerPath(destDir);
+    final result = await container.exec([
+      tarBin,
+      '-xzf',
+      containerArchivePath,
+      '-C',
+      containerDestDir,
+    ]);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Failed to extract tar archive $archivePath: ${result.stderr}',
+      );
+    }
+  };
+}
+
+/// Builds a [TakeoutArchiveExtractor] wired to the sanctioned production,
+/// container-routed listers/extractors ([containerZipLister],
+/// [containerZipExtractor], [containerTarLister], [containerTarExtractor])
+/// — the convenience constructor real callers ([MetadataStitcher]) are
+/// expected to use, mirroring how `dedupe_live_photos.dart` offers
+/// [containerFfprobeDurationReader] as a single production-seam builder
+/// rather than requiring callers to assemble each piece by hand.
+TakeoutArchiveExtractor containerTakeoutArchiveExtractor({
+  required ToolsContainer container,
+  String unzipBin = 'unzip',
+  String tarBin = 'tar',
+}) {
+  return TakeoutArchiveExtractor(
+    zipLister: containerZipLister(container: container, unzipBin: unzipBin),
+    zipExtractor: containerZipExtractor(
+      container: container,
+      unzipBin: unzipBin,
+    ),
+    tarLister: containerTarLister(container: container, tarBin: tarBin),
+    tarExtractor: containerTarExtractor(container: container, tarBin: tarBin),
+  );
+}
+
 /// Port of `safe_extract_zip`/`safe_extract_tar`: lists every member of an
 /// archive via the kind-appropriate lister, validates every single one
 /// with [isPathTraversalSafe] against [destDir] *before* extracting
@@ -972,13 +1185,21 @@ class StitchMetadataSummary {
 /// stops the run rather than silently skipping to the next one — exactly
 /// matching production behavior.
 class MetadataStitcher {
+  /// [archiveExtractor] is *required* — the archive-extraction half of this
+  /// port's #76 Phase 2 container migration (see this file's top-level
+  /// "Design decision: all three external tools ... route through
+  /// [ToolsContainer]" doc comment). Real callers should pass
+  /// [containerTakeoutArchiveExtractor] (backed by an already-started
+  /// [ToolsContainer]); tests pass a fake, or the host-shelling
+  /// `TakeoutArchiveExtractor()` (its own no-argument constructor defaults
+  /// to [defaultZipLister]/[defaultZipExtractor]/[defaultTarLister]/
+  /// [defaultTarExtractor]) for a container-free decision-logic check.
   MetadataStitcher({
     ExiftoolRunner? exiftool,
-    TakeoutArchiveExtractor? archiveExtractor,
+    required this.archiveExtractor,
     RsyncRunner? rsync,
     SafeFileMover? mover,
   }) : exiftool = exiftool ?? exiftoolRunner(),
-       archiveExtractor = archiveExtractor ?? TakeoutArchiveExtractor(),
        rsync = rsync ?? rsyncRunner(),
        mover = mover ?? const SafeFileMover();
 
