@@ -1719,3 +1719,112 @@ of #76 (tracking issue — see roadmap, stays open), not the whole issue. Flaggi
 review as required — this is the first PR where a real, human-triggerable pipeline step actually
 executes Dart-native logic instead of a subprocess, touching this repo's stated first priority
 (data-loss prevention) directly.
+
+## Phase 27 — `delete-confirm`/`restore-confirm` wired to `dartAction`: the pipeline's two most destructive steps (2026-07-15)
+
+**Context:** Phase 26 (PR #100) migrated the four SAFE/dry-run-or-non-destructive steps to
+`dartAction` and deliberately left `delete-confirm`/`restore-confirm` (`PipelineRisk
+.confirmRequired`) on `command`, deferred to a dedicated future PR with extra review. This is that
+PR — the highest-risk step in the entire #76 migration, since these two steps are the ones that
+actually move files on disk with no dry-run safety net once triggered.
+
+**Wiring:** `runDeleteConfirmStep`/`runRestoreConfirmStep`, added to `pipeline_models.dart`
+alongside Phase 26's four functions, follow the exact same conventions: top-level functions
+matching `PipelineDartAction`, referenced as plain tear-offs from `buildPipelineSteps()`, `emit`
+used for every line (including the first) so nothing vanishes from `StepRunState.log`'s
+overwrite-not-append behavior (see Phase 26's bug writeup — the same footgun, avoided the same
+way). `runDeleteConfirmStep` calls `DuplicateDeleter.run(confirm: true)`; `runRestoreConfirmStep`
+calls `TrashRestorer.run(confirm: true)` — both modules' confirm paths already existed (Phase 0b),
+this PR only wires them in.
+
+**Confirm-gate — verified untouched, not just assumed.** `canRunStep()` in `pipeline_runner.dart`
+was not modified by this PR and gates purely on `states`/`duplicateThumbnailReviewAcknowledged` —
+it never inspects `step.command`/`step.dartAction`, so it is structurally blind to which execution
+mechanism a step uses. Traced the actual call site: `media_pipeline_app.dart`'s
+`_runSelectedStep()` calls `canRunStep()` and returns early on failure *before* `_runner.run(step,
+...)` is ever invoked — this ordering is unchanged by this PR and applies identically whether
+`step.dartAction` or `step.command` is set. There is no new path by which either `dartAction` can
+run without its gate having already been satisfied. The `requiresDuplicateThumbnailReview` gate
+(issue #49) is likewise a pure caller-side UI concern, orthogonal to execution mechanism — this PR
+touches neither the gate nor the review dialog.
+
+**Interrupt-safety — investigated, finding: no worse than the status quo.** Both `dartAction`s
+delegate every real move to `SafeFileMover` (`filesystem_ops.dart`, unmodified by this PR).
+Same-filesystem moves (the common case — everything lives under one `$HD_PATH` tree) go through a
+single atomic `File.rename` syscall, exactly matching `mv`'s fast path: a kill at any point lands
+the file at the old path or the new path, never partial. Cross-device moves (only possible if
+`$HD_PATH` itself straddles multiple mounts) fall back to copy-verify-then-delete-original, never
+removing the source before the destination copy's byte length is confirmed — the worst possible
+outcome of an interrupt in that path is a harmless duplicate (both copies present), never a lost
+file, and this matches GNU `mv`'s own cross-device fallback (copy then unlink) exactly. Both
+`DuplicateDeleter.run`/`TrashRestorer.run` process one file at a time sequentially, the same
+granularity as the Bash scripts' own `while read` loops, so an interrupt mid-batch leaves exactly
+the same "some processed, rest untouched" state either implementation would produce. Full reasoning
+recorded as a design-note doc comment in `pipeline_models.dart` above the two new functions.
+
+**Real discovery during parity verification (unrelated to this PR's diff, documented not
+fixed):** while building the collision fixture for `restore-confirm`'s mirror-image test, found
+that `mv -n` exits 1 (not 0) on this environment's coreutils (9.4) when it skips an existing
+destination — and since `11_restore_from_trash.sh` runs under `set -euo pipefail`, that turns into
+a hard script failure on the *first* collision, aborting the whole restore batch and leaving every
+later file unprocessed. This is a real, pre-existing characteristic of the still-live Bash script
+(`restore_from_trash.dart`'s Dart port itself predates this PR — only its `dartAction` wiring is
+new here) — confirmed empirically against the real script, not inferred from documentation. The
+Dart `restore-confirm` dartAction does **not** inherit this bug: `TrashRestorer`/`SafeFileMover
+.moveNoClobber` already reports a collision as `RestoreAction.skippedExisting` and continues to the
+next file rather than throwing. A dedicated test
+(`test/confirm_step_dart_bash_mirror_parity_test.dart`'s `DISCOVERY: ...` group) proves this
+empirically on both sides — the real Bash script aborting non-zero, the real Dart dartAction
+finishing successfully having skipped only the one colliding file. Out of scope to fix the Bash
+script (issue #76's Phase 7 keeps it as a fallback for one release cycle), but worth flagging
+loudly: this is an argument *for* finishing the Dart migration, not just parity with it.
+
+**Mirror-image parity test (this PR's load-bearing proof) —
+`test/confirm_step_dart_bash_mirror_parity_test.dart`, 3 tests:**
+- `delete-confirm` test: drives the real Dart `delete-dry-run` then real Dart `delete-confirm`
+  `dartAction`s (via `PipelineRunner`/`buildPipelineSteps`, the actual wired app path) against a
+  fixture with two duplicate groups, one pre-seeded to force a `media_trash` destination collision.
+  Independently runs the real, untouched `06_delete_duplicates.sh --confirm` against an
+  identically-shaped fixture on a second, independent temp root. Cross-checks the resulting
+  `media_trash` layout and surviving `cleaning_staging` files bit-for-bit — every relative path
+  (normalized against each side's own random temp-dir prefix, since two independently-generated
+  temp roots can never share literal absolute paths) and every byte of content — proving both the
+  numbered-suffix-rename collision path and the plain no-collision path agree exactly.
+- `restore-confirm` no-collision test: same shape, comparing the real Dart `restore-dry-run` +
+  `restore-confirm` against the real, untouched `11_restore_from_trash.sh --confirm`, on a fixture
+  with no collision (see the discovery above for why a collision can't be used in this particular
+  comparison — the Bash side wouldn't produce a comparable completed layout).
+- `DISCOVERY` test: documents and empirically proves the `mv -n`/`set -e` abort-on-collision
+  finding above, and proves the Dart dartAction's more-robust continue-past-collision behavior.
+
+**Log visibility:** both actions emit real per-file progress as each file is processed (`Trashed:`
+/ `Trashed (renamed to avoid collision):` / `Missing, skipping:` / `Refusing outside staging:` for
+delete; `Restored:` / `Skipped (destination already exists):` for restore), plus a final tally line
+— these are the two actions a human is watching most closely, per this PR's own brief.
+`runRestoreConfirmStep`'s log text is deliberately more accurate than the real Bash script's own
+output on a skip (see the discovery above: Bash's `echo "Restored: $dest"` runs unconditionally
+after `mv -n`, even when nothing was actually moved) — a corrected log message, not a functional
+behavior change; the underlying skip-on-collision file behavior is unchanged and covered by the
+parity test.
+
+**Existing test updated (1):** `test/pipeline_models_test.dart`'s "confirm cleanup keeps explicit
+confirm argument" renamed to "delete-confirm is Dart-native (issue #76) and never a --confirm
+command" and rewritten to assert `step.command` is `null`/`step.dartAction` is non-null, mirroring
+the equivalent Phase 26 update for the dry-run steps — a stronger guarantee than the old
+argument-list check, since there is no argument list at all any more.
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green, 363 -> 366 tests
+(3 net new, all in `test/confirm_step_dart_bash_mirror_parity_test.dart`; 1 existing test renamed/
+rewritten, not counted as new), 1 skipped (Windows-only, expected on this Linux CI environment).
+Reran the full suite twice to confirm stability; the pre-existing, already-documented
+`stdout/stderr separation` timing flakiness under full-suite parallel load (unrelated to this PR)
+was not observed in either run.
+
+**Outcome:** Every non-setup, non-scan pipeline step that has a Dart port now genuinely runs it in
+production — `06_delete_duplicates.sh --confirm`/`11_restore_from_trash.sh --confirm` are no longer
+on the executed path, though both scripts remain in the repo, untouched, as the documented one-
+release-cycle fallback (issue #76's Phase 7). The confirm-gate invariant traced across every PR in
+this sequence (#99, #100, this one) is confirmed to still hold. Part of #76 (tracking issue — see
+roadmap, stays open), not the whole issue. Flagging **Cody + Astrid** review as required, with extra
+emphasis per this PR's own stakes — this touches the two most destructive, least-reversible-feeling
+actions in the whole app.
