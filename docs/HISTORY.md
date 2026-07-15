@@ -1000,3 +1000,61 @@ test.** Part of #76 and #77; not closing either — next up is Phase 1 wiring di
 still needs Phase 2 (wire this whole series into the tools-container execution path) and Phases 3-7;
 #77 (Design B, native runtime) branches from this same shared Phase 0 into its own installer-based
 next steps.
+## Phase 19 — `SafeFileMover` collision-rename fix: match Bash's `unique_destination()` exactly (2026-07-15)
+
+**Context:** Phase 0b's four Dart ports (`11`/`06`/`12`/`13`, PRs #82/#86/#87/#88) each carried a
+documented deviation from Bash: `SafeFileMover.moveNoClobber` always skips on a destination
+collision (`mv -n` semantics), while `06_delete_duplicates.sh`, `12_clean_immich_takeout_duplicates.sh`,
+and `13_dedupe_live_photos.sh` each carry an identical inline `unique_destination()` algorithm that
+instead resolves a collision with a numbered suffix (`_1`, `_2`, ...) and always moves. Leo reviewed
+this deviation (flagged across those PRs) and decided: match Bash's real behavior exactly, per real
+script — not one uniform Dart-only policy. Investigating the real Bash scripts closely surfaced a
+nuance the original framing missed: `11_restore_from_trash.sh` is a literal `mv -n` with no
+`unique_destination` logic at all, so that port's existing skip-on-collision behavior was already
+correct and did not need to change.
+**Decisions:**
+- Added `uniqueDestinationPath(desiredPath, exists)` to `lib/src/filesystem_ops.dart`: a pure,
+  synchronous, zero-I/O port of Bash's `unique_destination()`, verified against real `bash` runs
+  (not hand-derived) for every edge case, including two intentionally-reproduced Bash quirks: the
+  split point is the *last* `.` in the **full path string** (not the basename — a dot in a
+  *directory* component wins over a dot-less filename, e.g. `/a/b.c/photo` splits at `b.c`, not at
+  `photo`), and a leading-dot dotfile (`.bashrc`) still counts as "having a dot." No upper retry
+  bound, matching Bash's own unbounded `while true` loop.
+- Split `SafeFileMover`'s single collision behavior into two named methods rather than changing
+  `moveNoClobber` in place: `moveNoClobber` (unchanged — `mv -n`/skip, matches
+  `11_restore_from_trash.sh`'s real behavior) and the new `moveRenamingOnCollision` (Bash
+  `unique_destination()` semantics — resolves via `uniqueDestinationPath` and always moves, never
+  skips, returning a `MoveOutcome` carrying the actual destination path used). `restore_from_trash.dart`
+  needed zero changes as a result.
+- `delete_duplicates.dart`, `clean_takeout_duplicates.dart`, and `dedupe_live_photos.dart` switched
+  their `SafeFileMover` calls from `moveNoClobber` to `moveRenamingOnCollision`; each file's
+  `*Action` enum's `skippedExisting` value was replaced with a `trashedWithSuffix`/`movedWithSuffix`
+  equivalent, and each outcome's `destinationPath` now reflects the actual (possibly suffixed) path
+  used rather than the originally-requested one. The keep/trash and verify/reject *decision* logic
+  in all three files is unchanged; only what happens after a collision is detected changed.
+**No-clobber semantics change:** for `06`/`12`/`13`, a trash-bound move is never left un-moved on
+collision — either it lands at the requested destination or a numbered-suffix alternative, matching
+Bash's guarantee that a move into `$MEDIA_TRASH` always succeeds. `11_restore_from_trash.sh`'s
+skip-on-collision guarantee (an unresolved trash item stays in the trash rather than colliding with
+a real file at the restore destination) is unchanged.
+**Verification:** `test/filesystem_ops_test.dart` adds a `uniqueDestinationPath` Bash-parity group
+(every expected value captured from real `bash` runs against a dot-free temp directory: no
+collision, single collision, dotfile, no-extension, multi-dot, trailing-dot, the directory-dot
+quirk, and unbounded-retry) and a `moveRenamingOnCollision` group (no-collision, single-collision,
+repeated-collision). `test/delete_duplicates_test.dart`, `test/clean_takeout_duplicates_test.dart`,
+and `test/dedupe_live_photos_test.dart`'s former "never clobbers (mv -n semantics)" tests were
+rewritten to assert the new rename-on-collision behavior instead of being deleted.
+`test/restore_from_trash_test.dart` required no changes — its skip-on-collision tests still describe
+real, current behavior. `flutter analyze`: no issues. `flutter test`: full suite green (one
+pre-existing, unrelated flake in `pipeline_runner_test.dart`'s stdout/stderr-separation test under
+full-suite parallel load, confirmed pre-existing and passing in isolation both before and after this
+change).
+**Pivots:** The task brief described the pre-existing behavior as a uniform deviation across all
+four ports; direct inspection of `11_restore_from_trash.sh`'s real Bash source showed it was not
+actually deviating (`mv -n`, no `unique_destination`), so that port's collision behavior was
+deliberately left unchanged rather than forced into the rename scheme, to avoid introducing a new
+deviation where none existed.
+**Outcome:** `SafeFileMover` now offers two collision strategies, each matching its real Bash
+counterpart exactly; `06`/`12`/`13`'s trash moves can no longer silently strand a file un-moved.
+Part of #76 and #77; not closing either. PR flags Cody + Astrid review as required — this changes
+safety-critical move behavior across three of the four already-reviewed Phase 0b ports.
