@@ -316,19 +316,44 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       }
     });
 
-    final result = await _runner.run(
-      step,
-      _settings,
-      onLog: (chunk) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          final current = _states[step.id] ?? const StepRunState();
-          _states[step.id] = current.copyWith(log: current.log + chunk);
-        });
-      },
-    );
+    // `PipelineRunner.run()` deliberately propagates an uncaught throw from
+    // a `dartAction`-backed step rather than swallowing it into a fake
+    // result (see `pipeline_runner_test.dart`'s "runner propagates an
+    // uncaught throw..." test) — before this PR no real step used
+    // `dartAction`, so this path was unreachable; now that real steps do,
+    // an uncaught throw here must still reset `_runningStepId` and surface
+    // a visible failure, otherwise this step's controls stay disabled until
+    // an app restart (Cody's PR #99 review finding).
+    PipelineRunResult result;
+    try {
+      result = await _runner.run(
+        step,
+        _settings,
+        onLog: (chunk) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            final current = _states[step.id] ?? const StepRunState();
+            _states[step.id] = current.copyWith(log: current.log + chunk);
+          });
+        },
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _runningStepId = null;
+        final current = _states[step.id] ?? const StepRunState();
+        _states[step.id] = current.copyWith(
+          status: PipelineStepStatus.failed,
+          exitCode: -1,
+          log: '${current.log}\nERROR: step "${step.id}" threw: $error\n',
+        );
+      });
+      return;
+    }
 
     if (!mounted) {
       return;
@@ -460,53 +485,100 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       _guidedRunning = true;
     });
 
-    final result = await _guidedRunController.run(
-      steps: segmentSteps,
-      settings: _settings,
-      onStepStart: (step) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _runningStepId = step.id;
-          _states[step.id] = const StepRunState(
-            status: PipelineStepStatus.running,
-          );
-          if (step.id == 'delete-dry-run') {
-            // Same invalidation rule as the manual single-step run path.
-            _dedupReviewAcknowledged = false;
-            _dedupReviewedIndices = {};
+    // Tracked alongside `GuidedRunController.run`'s own return value so a
+    // thrown `dartAction` (caught below) can still report which steps in
+    // this segment attempt actually completed before the throw, the same
+    // information `GuidedRunResult.completedStepIds` carries on a normal
+    // `stepFailed`/`aborted` outcome.
+    final completedInThisAttempt = <String>[];
+
+    GuidedRunResult result;
+    try {
+      result = await _guidedRunController.run(
+        steps: segmentSteps,
+        settings: _settings,
+        onStepStart: (step) {
+          if (!mounted) {
+            return;
           }
-        });
-      },
-      onStepComplete: (step, stepResult) {
-        if (!mounted) {
-          return;
+          setState(() {
+            _runningStepId = step.id;
+            _states[step.id] = const StepRunState(
+              status: PipelineStepStatus.running,
+            );
+            if (step.id == 'delete-dry-run') {
+              // Same invalidation rule as the manual single-step run path.
+              _dedupReviewAcknowledged = false;
+              _dedupReviewedIndices = {};
+            }
+          });
+        },
+        onStepComplete: (step, stepResult) {
+          if (stepResult.succeeded) {
+            completedInThisAttempt.add(step.id);
+          }
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _runningStepId = null;
+            _states[step.id] = (_states[step.id] ?? const StepRunState())
+                .copyWith(
+                  status: stepResult.succeeded
+                      ? PipelineStepStatus.succeeded
+                      : PipelineStepStatus.failed,
+                  exitCode: stepResult.exitCode,
+                  log: stepResult.output,
+                  stdoutLog: stepResult.stdoutOutput,
+                );
+          });
+        },
+        onLog: (chunk) {
+          final currentStepId = _runningStepId;
+          if (!mounted || currentStepId == null) {
+            return;
+          }
+          setState(() {
+            final current = _states[currentStepId] ?? const StepRunState();
+            _states[currentStepId] = current.copyWith(
+              log: current.log + chunk,
+            );
+          });
+        },
+      );
+    } catch (error) {
+      // `GuidedRunController.run` calls `PipelineRunner.run` internally for
+      // every step, so a `dartAction` throw propagates out of this `await`
+      // exactly like it does from the single-step path above (see that call
+      // site's comment). `onStepStart` already set `_runningStepId` to the
+      // step that was running when it threw; `onStepComplete` never fires
+      // for that step, so its `StepRunState` needs the same
+      // failed-not-stuck treatment here.
+      if (!mounted) {
+        return;
+      }
+      final failedStepId = _runningStepId;
+      setState(() {
+        _guidedRunning = false;
+        _runningStepId = null;
+        if (failedStepId != null) {
+          final current = _states[failedStepId] ?? const StepRunState();
+          _states[failedStepId] = current.copyWith(
+            status: PipelineStepStatus.failed,
+            exitCode: -1,
+            log: '${current.log}\nERROR: step "$failedStepId" threw: $error\n',
+          );
         }
-        setState(() {
-          _runningStepId = null;
-          _states[step.id] = (_states[step.id] ?? const StepRunState())
-              .copyWith(
-                status: stepResult.succeeded
-                    ? PipelineStepStatus.succeeded
-                    : PipelineStepStatus.failed,
-                exitCode: stepResult.exitCode,
-                log: stepResult.output,
-                stdoutLog: stepResult.stdoutOutput,
-              );
-        });
-      },
-      onLog: (chunk) {
-        final currentStepId = _runningStepId;
-        if (!mounted || currentStepId == null) {
-          return;
-        }
-        setState(() {
-          final current = _states[currentStepId] ?? const StepRunState();
-          _states[currentStepId] = current.copyWith(log: current.log + chunk);
-        });
-      },
-    );
+        _guidedLastResult = GuidedRunResult(
+          outcome: GuidedRunOutcome.stepFailed,
+          completedStepIds: completedInThisAttempt,
+          failedStepId: failedStepId,
+        );
+        _guidedSegmentCompletedCount =
+            resumeFromIndex + completedInThisAttempt.length;
+      });
+      return;
+    }
 
     if (!mounted) {
       return;
