@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'clean_takeout_duplicates.dart';
 import 'delete_duplicates.dart';
+import 'duplicate_scan.dart';
 import 'restore_from_trash.dart';
 import 'stitch_metadata.dart';
 import 'tools_container.dart';
@@ -238,10 +239,19 @@ List<PipelineStep> buildPipelineSteps() {
     PipelineStep(
       id: 'scan-duplicates',
       title: 'Scan Duplicates',
-      description: 'Run Czkawka duplicate and optional blur scans.',
+      description: 'Run Czkawka duplicate scans.',
       risk: PipelineRisk.reviewRequired,
-      command: PipelineCommand('bash', ['scripts/05_cleanup_scan.sh']),
-      requiredTools: ['czkawka_cli', 'ffmpeg', 'ffprobe', 'convert'],
+      dartAction: runScanDuplicatesStep,
+      // `czkawka_cli` now runs inside the `ToolsContainer` this step starts
+      // itself, not on the host directly. The optional blur scan
+      // (`ffmpeg`/`ffprobe`/`convert`) is NOT part of this Dart-native
+      // action — see `duplicate_scan.dart`'s top-level "blur-scan is NOT
+      // ported" design decision (issue #103, option (b)): ImageMagick isn't
+      // bundled in the tools image, and this port's scope is the
+      // duplicate-detection scans `delete_duplicates.dart` actually
+      // depends on. Blur detection is still available by running
+      // `scripts/05_cleanup_scan.sh` directly.
+      requiredTools: ['docker'],
     ),
     PipelineStep(
       id: 'delete-dry-run',
@@ -419,15 +429,16 @@ List<List<String>> buildGuidedRunSegments() {
 // Dart-native step actions (issue #76): wiring the already-ported,
 // already-container-routed Dart modules (`delete_duplicates.dart`,
 // `restore_from_trash.dart`, `clean_takeout_duplicates.dart`,
-// `stitch_metadata.dart`) into real [PipelineStep]s via
-// [PipelineStep.dartAction]. This now covers all six non-setup/non-scan
-// steps that have a Dart port: the four SAFE/dry-run-or-non-destructive
-// steps from the prior PR in this sequence, plus `delete-confirm`/
-// `restore-confirm` (`PipelineRisk.confirmRequired`) — the pipeline's two
-// most destructive, irreversible-feeling actions — wired by this PR.
-// `scan-duplicates` (`05_cleanup_scan.sh`) has no Dart port at all (only
-// `06`'s report-parsing/dry-run/confirm logic was ported, not `05`'s own
-// Czkawka scan invocation) and is likewise left on `command`.
+// `stitch_metadata.dart`, `duplicate_scan.dart`) into real [PipelineStep]s
+// via [PipelineStep.dartAction]. This now covers every non-setup step that
+// has a Dart port: the four SAFE/dry-run-or-non-destructive steps and
+// `delete-confirm`/`restore-confirm` (`PipelineRisk.confirmRequired`, the
+// pipeline's two most destructive, irreversible-feeling actions) from the
+// prior two PRs in this sequence, plus `scan-duplicates` (issue #103) wired
+// by this PR — the last remaining gap issue #76's own Phase 2 roadmap
+// called out. See `duplicate_scan.dart`'s top-level doc comment for that
+// port's own design decisions (temp report staging under `$HD_PATH`, the
+// `czkawka_cli` `$HOME` fix, and the blur-scan exclusion).
 //
 // ## `delete-confirm`/`restore-confirm` — confirm-gate is untouched
 //
@@ -979,6 +990,74 @@ Future<PipelineRunResult> runStitchMetadataStep(
     '${summary.archivesProcessed}; media moved: ${summary.mediaMoved}; '
     'warnings: ${summary.warnings}.',
   );
+
+  final text = buffer.toString();
+  return PipelineRunResult(exitCode: 0, output: text, stdoutOutput: text);
+}
+
+/// Dart-native replacement for `bash scripts/05_cleanup_scan.sh` — the
+/// `scan-duplicates` step. Wraps [DuplicateScanRunner], routing its one
+/// external tool (`czkawka_cli`) through a fresh [ToolsContainer] session
+/// started and torn down for the duration of this single step run (see this
+/// file's "ToolsContainer lifecycle" design note above). See
+/// `duplicate_scan.dart`'s top-level doc comment for the full set of design
+/// decisions this wiring depends on (temp report staging under `$HD_PATH`
+/// since [ToolsContainer] only bind-mounts one directory and `$REPORT_DIR`
+/// is not normally under `$HD_PATH`; the `czkawka_cli` `$HOME` fix; and why
+/// the optional blur scan is deliberately not part of this action).
+///
+/// Catches [CleaningStagingNotFoundException] specifically and converts it
+/// to a clean failed [PipelineRunResult] — the same "well-known, always
+/// possible condition" treatment `runRestoreDryRunStep` gives
+/// `TrashRootNotFoundException` (see this file's "none of these catch a
+/// thrown exception" design note): `$CLEANING_STAGING` not existing yet
+/// (e.g. `stitch-metadata` hasn't run) is a normal, expected state, not a
+/// bug. [CzkawkaScanFailedException] (a genuine `czkawka_cli` crash/signal
+/// death) is deliberately left to propagate uncaught, same as every other
+/// unanticipated failure in this file's `dartAction`s.
+Future<PipelineRunResult> runScanDuplicatesStep(
+  PipelineSettings settings,
+  LogSink? onLog,
+) async {
+  final buffer = StringBuffer();
+  void emit(String line) {
+    buffer.writeln(line);
+    onLog?.call('$line\n');
+  }
+
+  final stagingDir = _pipelineChildPath(settings.hdPath, 'cleaning_staging');
+
+  emit('==> Media directory: $stagingDir');
+  emit('==> Report directory: ${settings.reportDir}');
+
+  const runner = DuplicateScanRunner();
+  final DuplicateScanSummary summary;
+  try {
+    summary = await ToolsContainer.withSession(
+      hostMountRoot: settings.hdPath,
+      body: (container) => runner.run(
+        stagingDir: stagingDir,
+        reportDir: settings.reportDir,
+        container: container,
+        onLog: emit,
+      ),
+    );
+  } on CleaningStagingNotFoundException catch (error) {
+    emit('ERROR: staging folder missing: ${error.path}');
+    final text = buffer.toString();
+    return PipelineRunResult(exitCode: 1, output: text, stdoutOutput: text);
+  }
+
+  emit(
+    '==> Blur scan not run by this step. Run `bash scripts/05_cleanup_scan.sh` '
+    '(RUN_BLUR_SCAN=1, the default) directly if you need blur detection.',
+  );
+
+  emit('');
+  emit('==> Summary');
+  emit('Image groups: ${summary.imageGroups}');
+  emit('Video groups: ${summary.videoGroups}');
+  emit('Exact duplicate groups: ${summary.duplicateFileGroups}');
 
   final text = buffer.toString();
   return PipelineRunResult(exitCode: 0, output: text, stdoutOutput: text);

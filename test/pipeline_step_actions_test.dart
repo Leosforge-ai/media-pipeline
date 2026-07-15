@@ -220,4 +220,58 @@ void main() {
     },
     skip: _imageReady ? false : _dockerSkipReason,
   );
+
+  test(
+    'scan-duplicates runs end-to-end through PipelineRunner against a real '
+    'ToolsContainer, finding a genuine byte-identical duplicate pair via '
+    'the real czkawka_cli dup scan (issue #103)',
+    () async {
+      final staging = Directory('${tempRoot.path}/cleaning_staging');
+      await staging.create(recursive: true);
+      // `czkawka_cli dup`'s own default `--minimal-file-size` is 8192 bytes
+      // (see docker/tools/README.md) — padded well past that so this
+      // fixture is actually scanned, not silently skipped as too small.
+      final bytes = List<int>.generate(20000, (i) => i % 256);
+      await File('${staging.path}/a.jpg').writeAsBytes(bytes);
+      await File('${staging.path}/b.jpg').writeAsBytes(bytes);
+
+      final step = buildPipelineSteps().singleWhere(
+        (step) => step.id == 'scan-duplicates',
+      );
+      final runner = PipelineRunner(workingDirectory: Directory.current.path);
+      final settings = PipelineSettings(
+        hdPath: tempRoot.path,
+        reportDir: '${tempRoot.path}/reports',
+      );
+
+      final loggedChunks = <String>[];
+      final result = await runner.run(
+        step,
+        settings,
+        onLog: loggedChunks.add,
+      );
+
+      expect(result.succeeded, isTrue);
+      expect(result.output, contains('Exact duplicate groups: 1'));
+      final report = File('${tempRoot.path}/reports/duplicate_files.txt');
+      expect(await report.exists(), isTrue);
+      final reportContent = await report.readAsString();
+      expect(reportContent, contains('a.jpg'));
+      expect(reportContent, contains('b.jpg'));
+      // Log visibility: real per-scan progress came through onLog live,
+      // not just in the final result.
+      expect(loggedChunks, isNotEmpty);
+      expect(
+        loggedChunks.join(),
+        contains('==> Running Czkawka exact duplicate file scan'),
+      );
+      // Blur scan is not run by this step (see duplicate_scan.dart's
+      // design decision) — no blurry_images.txt is ever written by it.
+      expect(
+        await File('${tempRoot.path}/reports/blurry_images.txt').exists(),
+        isFalse,
+      );
+    },
+    skip: _imageReady ? false : _dockerSkipReason,
+  );
 }
