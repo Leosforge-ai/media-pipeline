@@ -339,3 +339,90 @@ true)` call, (3) re-running every parity test against the actually-wired
 path. Also still open: Phase 3 (UID/GID mapping — two live reproductions
 now on record) needs solving before any of this can run for real on a
 Linux host without root/chmod workarounds.
+
+## 2026-07-15 — #76 Phase 3 (UID/GID) + Phase 2 app-wiring complete: all pipeline steps now Dart-native
+
+Same Sofie → Cody+Astrid (two real separate dispatches) → merge pattern
+throughout, real Docker used for verification at every step.
+
+- **PR #98** — Phase 3: `ToolsContainer.start()` now passes
+  `--user <host-uid>:<host-gid>` to `docker run` (via new
+  `detectHostUserFlag()`), closing the UID/GID gap PRs #94/#95 both hit
+  independently. Verified: container-written files come out owned by the
+  real host uid, not the image's baked-in uid 10000. Astrid's one
+  non-blocking finding — `detectHostUserFlag()` silently fell back to the
+  broken-permissions behavior on detection failure — was fixed in a
+  same-day follow-up commit (stderr `WARNING:` on the real-failure
+  branches, not the expected Windows branch) before merge.
+- **PR #99** — Phase 2 app-wiring, part 1/3: pure plumbing. Added
+  `PipelineStep.dartAction` (optional, constructor-asserted mutually
+  exclusive with `command`) and `PipelineRunner.run()`'s branch to run it
+  in-process instead of spawning a subprocess. Zero real steps migrated
+  yet — proven with synthetic tests only. Astrid confirmed `canRunStep()`
+  (the confirm-gate/dry-run-gate check) is structurally independent of
+  `command` vs `dartAction`, the safest possible design for what comes
+  next. Cody flagged a real forward-looking gap: no call site wraps
+  `runner.run()` in try/catch, so a future `dartAction` throw would leave
+  the UI's `_runningStepId` stuck non-null forever.
+- **PR #100** — part 2/3: migrated the 4 safe/dry-run steps
+  (`delete-dry-run`, `restore-dry-run`, `immich-takeout-duplicate-dry-run`,
+  `stitch-metadata`) to real `dartAction`s, and fixed the stuck-UI-state
+  gap PR #99 flagged. `scan-duplicates` was deliberately left alone — no
+  Dart port of the actual Czkawka-scan-invocation existed yet (only `06`'s
+  report-*parsing* logic was ported). Caught and fixed a real bug during
+  development: the first `onLog` line of each dry-run step was silently
+  dropped from `PipelineRunResult.output` (a live-only `onLog` call vs. the
+  buffer the result reads from).
+- **PR #101** — part 3/3, the highest-risk PR in the whole migration:
+  migrated `delete-confirm`/`restore-confirm` — the two actually-destructive
+  confirm-gated actions — to `dartAction`, a genuine hard cutover (no
+  Bash fallback toggle; `command` and `dartAction` stay mutually exclusive
+  at the type level). Proven via a new "mirror-image" parity test: real
+  Dart dry-run → real Dart confirm, cross-checked byte-for-byte against
+  the real, untouched Bash confirm scripts run on an independently-built
+  identical fixture. Interrupt-safety explicitly investigated (not
+  assumed): same-filesystem moves are atomic `File.rename`; cross-device
+  fallback never deletes source before the destination copy is
+  byte-verified — no worse than the Bash `mv`/EXDEV fallback it replaces.
+  **Bonus discovery**: the real, still-live `11_restore_from_trash.sh`
+  silently aborts the *entire* restore batch on its first filename
+  collision, because this environment's coreutils 9.x `mv -n` exits 1 (not
+  0) on skip and the script runs under `set -e` — the Dart path doesn't
+  inherit this bug. Documented, not fixed (Bash stays as fallback per
+  Phase 7); filed as issue #102 so it isn't lost.
+- **PR #104** — closed the last Phase 2 gap: ported `05_cleanup_scan.sh`'s
+  three Czkawka scan invocations (image/video/dup) to
+  `lib/src/duplicate_scan.dart`, preserving the exact fail-closed exit-code
+  classification from issue #81/PR #83 (only 0/11 non-fatal). Explicit
+  scope decision, documented rather than defaulted: ImageMagick's
+  `convert` (used only by the optional blur-scan feature) was **not**
+  added to the tools Docker image — blur-scan stays Bash-only, nothing
+  downstream consumes its output today. **Real bug found and fixed along
+  the way**: `czkawka_cli` panics (exit 101) under the Phase-3 `--user`
+  override because the arbitrary host uid has no `/etc/passwd` entry and
+  thus no writable `$HOME` for its cache DB — fixed with an explicit
+  `env HOME=<container temp dir>` per invocation. Astrid judged this a
+  genuine one-off (the other 3 container-routed tools are stateless) but
+  recommended moving the fix to `ToolsContainer` itself before the next
+  consumer that needs a writable `$HOME` has to rediscover it —
+  filed as issue #105.
+
+**#76 Phase 2 and Phase 3 are now both fully complete.** All 7 pipeline
+steps with a Dart port are `dartAction`-backed; the remaining 6 steps in
+`buildPipelineSteps()` (`check-system`, `setup-dependencies`,
+`configure-rclone`, `sync-immich`, `setup-immich`, `verify-cleanup`,
+`verify-immich`) were never in scope for a Dart port. `delete_duplicates.dart`
+and `drive_detection.dart` were already confirmed out of scope in the prior
+entry above (no external-tool calls / needs real host device visibility).
+
+RESUME AT: everything left on #76 is blocked on hardware/CI-runner access
+this environment doesn't have — Phase 4 (macOS end-to-end verification),
+Phase 5 (Windows end-to-end verification, also needs
+`detectHostUserFlag()`'s Windows UID/GID gap solved), Phase 6
+(docs/CI updates for those platforms), Phase 7 (Bash retirement, gated on
+4-6 plus deciding what to do about #102's Bash restore-abort bug). Also
+open: issue #103 (tracks Phases 4-7 as a single checklist) and issue #105
+(`ToolsContainer`-level `$HOME` fix, low urgency — no live consumer is
+broken today). #76 itself stays open per its own closing condition
+("until Bash scripts are actually retired") — do not close it even once
+4-7 are scoped, only once Bash is genuinely gone.
