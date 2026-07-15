@@ -48,6 +48,58 @@ exit 0
   return fake;
 }
 
+/// A Dart-native stand-in for [_writeFakeExiftool]'s marker protocol, used
+/// only by the Bash^H^H Python-vs-Dart parity test's *Dart* side below.
+///
+/// ## Why the parity test's Dart side no longer shells out to `exiftool`
+/// (real or fake) at all
+///
+/// Before this migration (`lib/src/stitch_metadata.dart`'s top-level
+/// "Design decision: all three external tools ... route through
+/// [ToolsContainer]" doc comment), the Dart side of this test called
+/// `exiftoolRunner(exiftoolBin: fakeExiftool.path)` — i.e. it exercised the
+/// *host* `Process.run` mechanism against a fake binary on disk, mirroring
+/// exactly what the real Python script also does via its `PATH` override.
+/// Now that real `exiftool` invocation is routed through a [ToolsContainer]
+/// exec in production, reusing that host-shelling approach here would mean
+/// either (a) standing up a real container and somehow getting a stub
+/// `exiftool` installed *inside* the pinned `media-pipeline-tools` image
+/// just for this one test — a lot of moving parts for a test whose actual
+/// job is verifying `apply_metadata_with_exiftool`'s tag-building and
+/// skip-on-len-3 decision logic, not the container-exec mechanism — or (b)
+/// keeping the host-process seam wired in as if it were still the
+/// production path, which it no longer is (see PR #94's identical call on
+/// this exact tradeoff for `dedupe_live_photos.dart`'s `ffprobe` migration).
+///
+/// This test's real job is proving the Dart port's processed/warning counts
+/// and file placement match the real Python script's exactly; that has
+/// nothing to do with *how* `exiftool`'s exit code and output get fetched.
+/// So this function replicates [_writeFakeExiftool]'s exact marker-file
+/// protocol directly in Dart, with zero process/container involvement —
+/// the Python-vs-Dart comparison below stays meaningful (both sides consume
+/// the identical synthetic fixture files under the identical marker
+/// protocol; only the *mechanism* invoking "exiftool" differs, which is not
+/// what this test is verifying). The real container-exec mechanism (host
+/// path -> container path translation -> real `exiftool` -> file actually
+/// tagged) is covered separately, for real, by the Docker-gated group in
+/// this file below (see "stitch metadata via a real ToolsContainer").
+Future<(int, String, String)> _fakeExiftoolRunnerFromMarkerFile(
+  List<String> args,
+) async {
+  if (args.isEmpty) return (1, 'no media path given', '');
+  final mediaPath = args.last;
+  final file = File(mediaPath);
+  var firstLine = '';
+  if (await file.exists()) {
+    final lines = await file.readAsLines();
+    firstLine = lines.isEmpty ? '' : lines.first;
+  }
+  if (firstLine == 'FAIL_EXIFTOOL') {
+    return (1, 'fake exiftool: simulated corrupt file', '');
+  }
+  return (0, '', '');
+}
+
 void main() {
   group('archiveStem', () {
     test('strips .tar.gz', () {
@@ -799,7 +851,8 @@ void main() {
           expect(dartZip.exitCode, 0, reason: dartZip.stderr as String);
 
           final stitcher = MetadataStitcher(
-            exiftool: exiftoolRunner(exiftoolBin: fakeExiftool.path),
+            exiftool: _fakeExiftoolRunnerFromMarkerFile,
+            archiveExtractor: TakeoutArchiveExtractor(),
           );
           final summary = await stitcher.run(dartHdPath);
 
