@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'filesystem_ops.dart';
+import 'tools_container.dart';
 
 /// Dart port of `scripts/13_dedupe_live_photos.sh` (Phase 0b of issue
 /// #76/#77's shared roadmap; fourth and FINAL confirm-gated destructive
@@ -93,6 +94,45 @@ import 'filesystem_ops.dart';
 /// which may carry a numbered suffix. This does not affect the verify/skip
 /// *decision* logic that the Bash-vs-Dart parity test in
 /// `test/dedupe_live_photos_test.dart` verifies.
+///
+/// ## Design decision: `ffprobe` execution routes through [ToolsContainer]
+/// (Phase 2 of issue #76)
+///
+/// This is the first real consumer migration of #76 Phase 2 (container
+/// wiring), following the container-orchestration plumbing PR (#93,
+/// `tools_container.dart`). [containerFfprobeDurationReader] is now the
+/// sanctioned production [VideoDurationReader] — it execs the real,
+/// pinned `ffprobe` from the `media-pipeline-tools` image via a caller-owned,
+/// already-[ToolsContainer.start]ed [ToolsContainer], translating the host
+/// video path to its container-mounted equivalent via
+/// [ToolsContainer.hostToContainerPath] before every exec.
+///
+/// **Hard cutover, not a fallback pair.** [LivePhotoDedupeCleaner]'s
+/// [LivePhotoDedupeCleaner.durationReader] is a *required* constructor
+/// parameter — there is no longer an implicit default that silently shells
+/// out to a host-installed `ffprobe`. This repo's target users already run
+/// Docker (it's a hard requirement for Immich itself), so there is no real
+/// deployment scenario where the container path is unavailable but a
+/// Dart-native pipeline run still needs to work; keeping a "just in case"
+/// host fallback would only invite a caller to accidentally bypass the
+/// container path (and its path-translation safety net) by omission. The
+/// host-shelling [ffprobeDurationReader] function is kept — it is still the
+/// most direct way to exercise this module's decision logic in a unit test
+/// without standing up a container, and existing callers (all of them
+/// tests, per `test/dedupe_live_photos_test.dart`) already pass their own
+/// `durationReader` explicitly — but it is deliberately no longer wired in
+/// as this class's default, so nothing reaches it by omission.
+///
+/// **Not yet wired into the app.** Same "port the mechanism, defer the
+/// wiring" pattern as every other port in this series: no caller in
+/// `pipeline_models.dart`/`media_pipeline_app.dart` constructs a
+/// [ToolsContainer] or calls [LivePhotoDedupeCleaner] yet. That means this
+/// PR does not change any live runtime behavior — it changes what the
+/// *sanctioned* production seam is, ahead of the future PR that actually
+/// wires `LivePhotoDedupeCleaner.run` into the app (at which point that
+/// caller is expected to wrap the whole call in
+/// [ToolsContainer.withSession] and pass
+/// `containerFfprobeDurationReader(container: container)` in).
 ///
 /// ## Explicit non-goal (matching the original script's own scope boundary)
 ///
@@ -365,16 +405,23 @@ String trashDestinationPath({
 /// Reads a video's duration via `ffprobe` (or an injected stand-in),
 /// returning the raw stdout string, or `null` if the process failed or
 /// produced no output — mirroring `video_duration_seconds`'s
-/// `2>/dev/null || true`. The default ([ffprobeDurationReader]) shells out
-/// to the real `ffprobe` binary; tests inject a fake to exercise the
-/// decision logic deterministically without real encoded media, mirroring
-/// the Bash test suite's own `FFPROBE_BIN` override.
+/// `2>/dev/null || true`. [LivePhotoDedupeCleaner] takes this as a
+/// *required* constructor parameter (no implicit default — see this file's
+/// top-level "Design decision: `ffprobe` execution routes through
+/// [ToolsContainer]" doc comment); the sanctioned production implementation
+/// is [containerFfprobeDurationReader]. [ffprobeDurationReader] (host
+/// `Process.run`) remains available as a lower-ceremony way to exercise this
+/// module's decision logic in a test without standing up a container,
+/// mirroring the Bash test suite's own `FFPROBE_BIN` override.
 typedef VideoDurationReader = Future<String?> Function(String videoPath);
 
-/// Builds the default [VideoDurationReader]: shells out to [ffprobeBin]
-/// (defaulting to `ffprobe`, matching Bash's `FFPROBE_BIN="${FFPROBE_BIN:-ffprobe}"`
-/// override), passing the same arguments the Bash script's
-/// `video_duration_seconds` uses.
+/// Builds a host-`Process.run`-based [VideoDurationReader]: shells out to
+/// [ffprobeBin] (defaulting to `ffprobe`, matching Bash's
+/// `FFPROBE_BIN="${FFPROBE_BIN:-ffprobe}"` override), passing the same
+/// arguments the Bash script's `video_duration_seconds` uses. Not the
+/// production seam any more (see [containerFfprobeDurationReader]) — kept
+/// as a direct, container-free way for a test to exercise this module's
+/// decision logic against a stand-in `ffprobe` binary.
 VideoDurationReader ffprobeDurationReader({String ffprobeBin = 'ffprobe'}) {
   return (String videoPath) async {
     final result = await Process.run(
@@ -391,6 +438,54 @@ VideoDurationReader ffprobeDurationReader({String ffprobeBin = 'ffprobe'}) {
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
+    if (result.exitCode != 0) return null;
+    final out = (result.stdout as String).trim();
+    return out.isEmpty ? null : out;
+  };
+}
+
+/// Builds the sanctioned production [VideoDurationReader]: execs the real
+/// `ffprobe` binary bundled in the `media-pipeline-tools` image (Phase 1,
+/// `docker/tools/Dockerfile`) inside an already-[ToolsContainer.start]ed
+/// [container], via [ToolsContainer.exec].
+///
+/// [videoPath] (as always with [VideoDurationReader]) is a *host* absolute
+/// path — this function translates it to the container-mounted equivalent
+/// via [ToolsContainer.hostToContainerPath] before passing it to `ffprobe`,
+/// since the container only ever sees its own bind-mounted view of the
+/// filesystem. [ToolsContainer.hostToContainerPath] itself fails loudly
+/// ([ArgumentError]) if [videoPath] falls outside [container]'s
+/// `hostMountRoot` — this function does not add its own separate check, it
+/// relies on that existing fail-loud contract.
+///
+/// [container] must already be started ([ToolsContainer.start] /
+/// [ToolsContainer.withSession]) — this function only execs into it, it does
+/// not manage the container's lifecycle. That is a deliberate choice: a
+/// caller processing many candidate videos (as [LivePhotoDedupeCleaner.run]
+/// does) should start one long-lived container for the whole run, not one
+/// per file — see `tools_container.dart`'s own top-level doc comment on why
+/// `docker exec` into a kept-alive container, rather than a fresh `docker
+/// run` per call, is the point of [ToolsContainer] at all.
+///
+/// Same success/failure mapping as [ffprobeDurationReader]: a non-zero exit
+/// or empty stdout both map to `null`, mirroring `video_duration_seconds`'s
+/// `2>/dev/null || true` "produced nothing" case.
+VideoDurationReader containerFfprobeDurationReader({
+  required ToolsContainer container,
+  String ffprobeBin = 'ffprobe',
+}) {
+  return (String videoPath) async {
+    final containerPath = container.hostToContainerPath(videoPath);
+    final result = await container.exec([
+      ffprobeBin,
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
+      containerPath,
+    ]);
     if (result.exitCode != 0) return null;
     final out = (result.stdout as String).trim();
     return out.isEmpty ? null : out;
@@ -541,20 +636,21 @@ class LivePhotoDedupeSummary {
 class LivePhotoDedupeCleaner {
   LivePhotoDedupeCleaner({
     required this.trashRoot,
-    VideoDurationReader? durationReader,
+    required this.durationReader,
     this.mtimeReader = defaultFileMtimeReader,
     this.copier = defaultFileCopier,
     this.maxDurationSeconds = kMaxLivePhotoDurationSeconds,
     this.timestampProximitySeconds = kLivePhotoTimestampProximitySeconds,
-  }) : durationReader = durationReader ?? ffprobeDurationReader();
+  });
 
   /// Mirrors `$MEDIA_TRASH`.
   final String trashRoot;
 
-  /// Only ever overridden by tests (see [VideoDurationReader]'s doc
-  /// comment); real callers get the default `ffprobe`-shell-out
-  /// implementation, mirroring the Bash script's own `$FFPROBE_BIN`
-  /// override seam.
+  /// A *required* constructor parameter — deliberately no implicit default
+  /// (see this file's top-level "Design decision: `ffprobe` execution
+  /// routes through [ToolsContainer]" doc comment for why). Real callers
+  /// should pass [containerFfprobeDurationReader]; tests pass a fake, or
+  /// [ffprobeDurationReader] for a container-free decision-logic check.
   final VideoDurationReader durationReader;
 
   /// Only ever overridden by tests; real callers get the default
