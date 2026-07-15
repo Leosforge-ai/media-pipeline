@@ -37,10 +37,12 @@ import 'dart:math';
 /// ## Cleanup / leaked-container avoidance
 ///
 /// [start] always passes `--rm` to `docker run`, so the container is
-/// automatically removed by the Docker daemon the moment it stops — a
-/// `docker stop` (which [stop]/[dispose] issue) is enough to both stop and
-/// remove it in one step; a manual `docker rm` is never needed on the happy
-/// path. Every started container is also labelled
+/// scheduled for automatic removal by the Docker daemon the moment it stops.
+/// [stop]/[dispose] additionally issue an explicit `docker rm -f` after
+/// `docker stop`, so removal is synchronous from the caller's point of view
+/// too (see [stop]'s own doc comment for why `--rm` alone wasn't enough on
+/// its own during this PR's testing). Every started container is also
+/// labelled
 /// `${kToolsContainerSessionLabel}=<session-id>` (see [start]) so orphaned
 /// containers from an abnormal Dart-process termination (e.g. `SIGKILL`,
 /// which no userspace process — Dart included — can intercept) can still be
@@ -165,6 +167,22 @@ class ToolsContainer {
       'run',
       '-d',
       '--rm',
+      // `sleep infinity` runs as this container's PID 1 (no shell wrapper —
+      // see this file's top-level doc comment on why `sleep infinity` is
+      // used at all). Linux gives PID 1 special signal-disposition
+      // semantics: a signal with no explicitly installed handler is
+      // *dropped*, not delivered with its normal default action — so a bare
+      // `sleep infinity` as PID 1 does NOT terminate on `docker stop`'s
+      // SIGTERM the way it would as a non-PID-1 process, and `docker stop`
+      // would silently fall through to its full grace-period timeout (10s
+      // by default) before SIGKILL on every single [stop] call. `--init`
+      // runs a minimal init (tini) as the real PID 1 instead, which forwards
+      // signals to `sleep infinity` with normal (non-PID-1) semantics, so
+      // SIGTERM actually terminates it immediately. Verified empirically
+      // during this PR's own test development: without `--init`, `docker
+      // stop` on this container took the full ~10s default timeout on every
+      // call; with it, well under a second.
+      '--init',
       '--label',
       '$kToolsContainerSessionLabel=$sessionLabel',
       '-v',
@@ -224,24 +242,39 @@ class ToolsContainer {
     ]);
   }
 
-  /// Stops the running container (which, combined with [start]'s `--rm`,
-  /// also removes it — see this file's top-level doc comment). Idempotent:
-  /// calling this when no container is running (either [start] was never
-  /// called, or [stop] already ran) is a harmless no-op, so callers can
-  /// always call this unconditionally in a `finally` block (see
+  /// Stops the running container and waits for it to actually be gone.
+  /// Idempotent: calling this when no container is running (either [start]
+  /// was never called, or [stop] already ran) is a harmless no-op, so
+  /// callers can always call this unconditionally in a `finally` block (see
   /// [withSession]) without needing to track state themselves.
   ///
-  /// Does not throw if the underlying `docker stop` fails (e.g. the
-  /// container already died on its own) — this method's job is "make sure
-  /// nothing is left running/tracked," and a failed `docker stop` on an
-  /// already-gone container is the success case, not a failure, from the
-  /// caller's point of view. The container ID is always cleared from this
-  /// instance's bookkeeping regardless of `docker stop`'s own exit code.
+  /// Issues `docker stop <id>` first (a graceful SIGTERM, in case a
+  /// long-running `exec` is still writing something — see this file's
+  /// top-level doc comment on `--init` for why that terminates promptly
+  /// rather than waiting out the default 10s grace period), then `docker rm
+  /// -f $containerId` unconditionally. [start]'s `--rm` flag already schedules
+  /// automatic removal once the container stops, but that removal happens
+  /// asynchronously in the Docker daemon — this was verified empirically
+  /// during this PR's own test development to sometimes still be in flight
+  /// immediately after `docker stop` returns (a `docker inspect` run right
+  /// away could still find the container). The explicit `docker rm -f` call
+  /// makes removal synchronous from this method's caller's point of view: by
+  /// the time [stop] returns, the container is guaranteed gone, not merely
+  /// "probably about to be removed soon."
+  ///
+  /// Does not throw if either underlying `docker` call fails (e.g. the
+  /// container already died and was removed on its own, so `docker rm -f`
+  /// finds nothing) — this method's job is "make sure nothing is left
+  /// running/tracked," and a failed cleanup call against an already-gone
+  /// container is the success case, not a failure, from the caller's point
+  /// of view. The container ID is always cleared from this instance's
+  /// bookkeeping regardless of either call's exit code.
   Future<void> stop() async {
     final id = _containerId;
     if (id == null) return;
     _containerId = null;
     await runner(['stop', id]);
+    await runner(['rm', '-f', id]);
   }
 
   /// Alias for [stop], for callers that prefer a `dispose()`-style name
