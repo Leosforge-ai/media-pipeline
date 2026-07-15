@@ -914,3 +914,89 @@ Bash-vs-Dart parity test.** Part of #76 and #77; not closing either — next up 
 the fate of `04_stitch_metadata.py`: keep as an external Python dependency vs. port to Dart) or,
 alternatively, the actual app-wiring phase (Phase 2: replacing the Bash subprocess calls in
 `pipeline_models.dart`/`media_pipeline_app.dart` with these Dart implementations).
+
+## Phase 0c (concluded) — Dart port of `04_stitch_metadata.py`, completing shared Phase 0 (2026-07-15)
+
+**Context:** Leo decided Phase 0c (port `04_stitch_metadata.py` to Dart rather than keep it as an
+external Python dependency), the last open decision point in issue #76/#77's shared Phase 0 roadmap.
+Unlike the four Phase 0b scripts, this one has no confirm-gate/typed-phrase and never touches
+`media_trash` — it extracts Google Takeout archives, matches each media file to its Google Photos
+JSON sidecar, applies that metadata with `exiftool`, and moves every media file (whether or not
+metadata could be applied) into `cleaning_staging`. Still safety-relevant: it decides what data and
+metadata actually end up in `cleaning_staging` in the first place, and this repo's Python hard rule
+for this exact script ("continue past individual corrupt media files, log warnings clearly") had to
+be preserved as this port's own hard rule.
+**Decisions:**
+- Added `lib/src/stitch_metadata.dart`: `candidateJsonsForMedia` (the exact sidecar-matching
+  heuristic — exact name, stem, `.supplemental-metadata.json` variants, then two 45-character
+  truncated-name glob-equivalent scans, de-duplicated preserving first-seen order), `extractTimestamp`
+  (Google's `photoTakenTime`/`creationTime` epoch-to-`exiftool`-format conversion),
+  `applyMetadataWithExiftool` (builds the same date/title/description/GPS argument list and shells
+  out via an overridable `ExiftoolRunner`, mirroring `dedupe_live_photos.dart`'s `FFPROBE_BIN`-style
+  seam), `TakeoutArchiveExtractor` (list-then-validate-then-extract, reproducing
+  `safe_extract_zip`/`safe_extract_tar`'s path-traversal guard against every archive member before
+  extracting anything), `moveToStaging` (the numbered-suffix collision handling, reusing
+  `SafeFileMover.moveNoClobber` for the actual byte-safe move once a free name is chosen), and
+  `MetadataStitcher.run` (the full orchestration mirroring `main()`'s per-archive try/catch: a
+  corrupt/unsafe *archive* aborts the run and is kept for retry, but a corrupt/unmatched *media file*
+  inside an otherwise-good archive never aborts anything — the same two-tier safety model the real
+  script uses). Not wired into `pipeline_models.dart`/`media_pipeline_app.dart` — same "port the
+  logic, defer the wiring" pattern as every Phase 0b port before it; the real pipeline step still
+  shells out to `scripts/04_stitch_metadata.py`, which is completely untouched.
+- **Archive extraction shells out to `unzip`/`tar` rather than adding a pub.dev archive package:**
+  this repo's `pubspec.yaml` has no archive-handling dependency (only
+  `flutter`/`flutter_test`/`flutter_lints`), and every other external-tool integration in this
+  codebase (`exiftool`, `ffprobe`, `rclone`, `czkawka_cli`) already shells out via `Process.run` with
+  an overridable binary name rather than pulling in a pure-Dart decoder. Shelling out to `unzip -Z1`/
+  `tar -tzf` for listing (validated against `isPathTraversalSafe` before anything is extracted) and
+  `unzip -o -d`/`tar -xzf -C` for the actual extraction keeps this port consistent with that
+  precedent instead of introducing the only pure-Dart archive dependency in the app.
+- **Preserved a byte-for-byte quirk rather than silently fixing it:** the real Python
+  `apply_metadata_with_exiftool` builds `args = ["exiftool", "-overwrite_original"]` (length 2) and
+  skips exiftool entirely `if len(args) == 3` — i.e. only when *exactly one* single-flag tag
+  (`-Title=` or `-Description=`, with no date and no GPS) was queued. This reads as an off-by-one bug
+  (the true "no tags at all" case is `len(args) == 2` and, read literally, actually still invokes
+  exiftool with just `-overwrite_original` plus the file path). `applyMetadataWithExiftool` preserves
+  this exact behavior, including the zero-tag case still invoking exiftool — ported for parity, not
+  fixed, with the quirk documented in the module doc comment and flagged in the PR for Cody/Astrid to
+  weigh in on whether a follow-up fix issue against the Python script is warranted.
+- **`moveToStaging` deliberately does not use `SafeFileMover.moveNoClobber`'s skip-on-collision
+  behavior directly:** every Phase 0b port relies on that skip-on-collision semantics because those
+  scripts have a dry-run/confirm split with a human reviewing a report first. This script has no such
+  split — it always moves every file it finds, resolving a same-basename collision with a numbered
+  suffix (`photo_1.jpg`, `photo_2.jpg`, ...) instead, exactly matching
+  `tests/test_stitch_metadata.py::test_move_to_staging_renames_colliding_media`. `SafeFileMover` is
+  still reused for the actual move once a free destination name is chosen, for its cross-device
+  (`EXDEV`) fallback and copy-verify-then-delete safety net.
+**Verification:** `test/stitch_metadata_test.dart` (37 tests): unit coverage for `archiveStem`,
+`isMediaExtension`, `isSupportedArchiveFileName`, `extractTimestamp`, `isPathTraversalSafe`,
+`candidateJsonsForMedia` (against real tmp-dir fixtures, mirroring the Python test suite's own
+exact/supplemental/truncated-match case), `applyMetadataWithExiftool` (including the preserved
+`len(args)==3` quirk and its zero-tag counterpart), `TakeoutArchiveExtractor` (blocks extraction on
+any unsafe member before the extractor is ever invoked), `moveToStaging` (direct parity with the
+Python collision-rename test), `processExtractedTree`, and `MetadataStitcher.run` end-to-end against
+a real zip archive built via the `zip` CLI and extracted via the real `unzip`/`tar` binaries. Highest
+-value test: a real **Python-vs-Dart parity test** that builds an identical fixture for both sides
+(a clean match with a matching JSON sidecar, a missing-sidecar file, and a corrupt file that makes a
+fake `exiftool` stand-in exit non-zero), runs the real `scripts/04_stitch_metadata.py` via
+`Process.run` (the fake `exiftool` prepended onto `PATH`, since the Python script hard-codes the
+literal command name with no env-var override unlike the Bash scripts' `FFPROBE_BIN` convention),
+runs `MetadataStitcher` against a second identical fixture with the same fake `exiftool` binary
+injected via its overridable `ExiftoolRunner`, and asserts both report the same
+processed/warning counts (3 media moved, 2 warnings) and move the same three files into
+`cleaning_staging`. `flutter analyze`: no issues. `flutter test`: 278/278 passing (37 new).
+`python3 -m unittest tests.test_stitch_metadata`: 4/4 passing (untouched). `ruff check scripts`: all
+checks passed. `scripts/04_stitch_metadata.py` and `config/pipeline_config.py` are both untouched —
+additive only, matching every prior port's isolation.
+**Pivots:** None from the original plan; the work fit in one PR with clearly separated commits
+(logic port, then tests, then this history entry) rather than needing a multi-PR split.
+**Outcome:** `lib/src/stitch_metadata.dart` is a parity-tested, standalone Dart port of
+`04_stitch_metadata.py`'s decision logic, ready for Phase 2 wiring. PR flags Cody + Astrid review as
+required, matching the rigor of every prior port in this series. **This completes Phase 0c, and
+therefore ALL of issue #76/#77's shared Phase 0: drive detection (0a, PR #79) + all four
+confirm-gated destructive scripts (0b, PRs #82/#86/#87/#88) + metadata stitching (0c, this PR) are
+now all ported to Dart, each logic-only/unwired with its own real Bash-or-Python-vs-Dart parity
+test.** Part of #76 and #77; not closing either — next up is Phase 1 wiring differs by design: #76
+still needs Phase 2 (wire this whole series into the tools-container execution path) and Phases 3-7;
+#77 (Design B, native runtime) branches from this same shared Phase 0 into its own installer-based
+next steps.
