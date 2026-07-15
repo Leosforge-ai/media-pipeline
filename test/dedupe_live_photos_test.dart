@@ -3,6 +3,45 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_pipeline_app/src/dedupe_live_photos.dart';
+import 'package:media_pipeline_app/src/tools_container.dart';
+
+/// True only if a real Docker daemon is reachable from this machine.
+/// Mirrors `test/tools_container_test.dart`'s own `_dockerAvailable`
+/// exactly (duplicated here rather than shared, since test files in this
+/// repo don't import each other — matching that file's own precedent of
+/// mirroring, not reusing, `test/drive_detection_test.dart`'s
+/// `Platform.isLinux`-based skip-gate pattern).
+bool _dockerAvailable() {
+  try {
+    final result = Process.runSync('docker', [
+      'version',
+      '--format',
+      '{{.Server.Version}}',
+    ]);
+    return result.exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// True only if the `media-pipeline-tools:local` image is already built
+/// locally, per `docker/tools/README.md`. Mirrors
+/// `test/tools_container_test.dart`'s own `_toolsImageAvailable`.
+bool _toolsImageAvailable() {
+  try {
+    final result = Process.runSync('docker', [
+      'image',
+      'inspect',
+      kDefaultToolsImage,
+    ]);
+    return result.exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+final bool _dockerReady = _dockerAvailable();
+final bool _imageReady = _dockerReady && _toolsImageAvailable();
 
 /// Finds the repo root by walking up from this test file's directory until
 /// `scripts/13_dedupe_live_photos.sh` is found. Mirrors the
@@ -49,6 +88,50 @@ esac
   final result = await Process.run('chmod', ['0755', fake.path]);
   expect(result.exitCode, 0);
   return fake;
+}
+
+/// A Dart-native stand-in for [_writeFakeFfprobe]'s marker protocol, used
+/// only by the Bash-vs-Dart parity test below.
+///
+/// ## Why the parity test's Dart side no longer shells out to `ffprobe`
+/// (real or fake) at all
+///
+/// Before the container migration (`lib/src/dedupe_live_photos.dart`'s
+/// top-level "Design decision: `ffprobe` execution routes through
+/// [ToolsContainer]" doc comment), the Dart side of this test called
+/// `ffprobeDurationReader(ffprobeBin: fakeFfprobe.path)` — i.e. it exercised
+/// the *host* `Process.run` mechanism against a fake binary. Now that real
+/// `ffprobe` invocation is routed through a [ToolsContainer] exec in
+/// production, reusing that approach here would mean either (a) standing up
+/// a real container and somehow getting a stub `ffprobe` installed *inside*
+/// the pinned `media-pipeline-tools` image just for this one test — a lot
+/// of moving parts for a test whose actual job is verifying
+/// [evaluateLivePhotoPair]'s decision logic, not the container-exec
+/// mechanism — or (b) keeping the host-process seam wired in as if it were
+/// still the production path, which it no longer is.
+///
+/// This test's real job is proving `evaluate_pair`'s duration-then-timestamp
+/// priority logic matches the real Bash script exactly; that has nothing to
+/// do with *how* the raw duration string gets fetched. So this function
+/// replicates [_writeFakeFfprobe]'s exact marker-file protocol directly in
+/// Dart, with zero process/container involvement — the Bash-vs-Dart
+/// comparison below stays meaningful (both sides consume the identical
+/// synthetic fixture files under the identical marker protocol; only the
+/// *mechanism* reading them differs, which is not what this test is
+/// verifying). The real container-exec mechanism (host path -> container
+/// path translation -> real `ffprobe` -> duration parsed) is covered
+/// separately, for real, by the Docker-gated group in this file below (see
+/// "ffprobe via a real ToolsContainer").
+Future<String?> _fakeDurationReaderFromMarkerFile(String videoPath) async {
+  final file = File(videoPath);
+  if (!await file.exists()) return null;
+  final lines = await file.readAsLines();
+  final firstLine = lines.isEmpty ? '' : lines.first;
+  if (firstLine.startsWith('DURATION=')) {
+    return firstLine.substring('DURATION='.length);
+  }
+  if (firstLine == 'UNKNOWN') return null;
+  return '1.500000';
 }
 
 void main() {
@@ -721,13 +804,13 @@ void main() {
           expect(bashStdout, contains('Skipped, ambiguous match: 1'));
 
           // Independently compute the Dart port's decision for the exact
-          // same fixture, using the same fake ffprobe binary via the
-          // overridable VideoDurationReader seam.
+          // same fixture, using the Dart-native marker-file reader (see
+          // _fakeDurationReaderFromMarkerFile's doc comment for why this no
+          // longer shells out to a fake ffprobe binary) via the overridable
+          // VideoDurationReader seam.
           final cleaner = LivePhotoDedupeCleaner(
             trashRoot: '${tempDir.path}/media_trash',
-            durationReader: ffprobeDurationReader(
-              ffprobeBin: fakeFfprobe.path,
-            ),
+            durationReader: _fakeDurationReaderFromMarkerFile,
           );
           final summary = await cleaner.run(
             targetDir: '${tempDir.path}/immich_library',
@@ -766,4 +849,161 @@ void main() {
       );
     },
   );
+
+  group(
+    'ffprobe via a real ToolsContainer (requires Docker + the '
+    'media-pipeline-tools:local image built per docker/tools/README.md)',
+    () {
+      late Directory tempDir;
+
+      setUp(() async {
+        tempDir = await Directory.systemTemp.createTemp(
+          'dedupe_live_photos_container_test_',
+        );
+        // The `media-pipeline-tools` image runs as a fixed non-root UID
+        // (`tools`, uid 10000 — see docker/tools/Dockerfile), which will not
+        // generally match this test's own host UID. Real UID/GID mapping
+        // for bind-mounted writes is Phase 3 of issue #76 (not yet
+        // implemented); until then, this test-only fixture directory is
+        // made world-writable so the container can write the synthetic test
+        // video into it. This does not touch or work around anything in
+        // `lib/`/`docker/` — it's scoped to this temp test fixture only.
+        await Process.run('chmod', ['0777', tempDir.path]);
+      });
+
+      tearDown(() async {
+        if (await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
+      test(
+        'containerFfprobeDurationReader reads a real short video\'s '
+        'duration through the full path: host path -> container path '
+        'translation -> real ffprobe exec inside the pinned tools image -> '
+        'duration parsed by evaluateVideoDuration exactly as it would be '
+        "for a genuine Live Photo pair",
+        () async {
+          final container = ToolsContainer(hostMountRoot: tempDir.path);
+          await container.start();
+          try {
+            // Generate a real, short (2s) synthetic video using the same
+            // ffmpeg binary bundled in the tools image (not a pre-baked
+            // fixture checked into the repo) so this test exercises a
+            // genuinely encoded file, not a marker-protocol stand-in.
+            const containerVideoPath = '/data/live_photo_video.mp4';
+            final genResult = await container.exec([
+              'ffmpeg',
+              '-y',
+              '-f',
+              'lavfi',
+              '-i',
+              'color=c=black:s=32x32:d=2',
+              '-t',
+              '2',
+              containerVideoPath,
+            ]);
+            expect(
+              genResult.exitCode,
+              0,
+              reason: 'ffmpeg synthetic-video generation failed: '
+                  '${genResult.stderr}',
+            );
+
+            final hostVideoPath = '${tempDir.path}/live_photo_video.mp4';
+            expect(
+              await File(hostVideoPath).exists(),
+              isTrue,
+              reason:
+                  'the file ffmpeg wrote inside the container at '
+                  '$containerVideoPath must appear on the host at '
+                  '$hostVideoPath via the bind mount',
+            );
+
+            final reader = containerFfprobeDurationReader(
+              container: container,
+            );
+            // Pass the HOST path — exactly how LivePhotoDedupeCleaner._evaluate
+            // calls durationReader with videoPath from its directory walk.
+            // containerFfprobeDurationReader is responsible for translating
+            // it internally via ToolsContainer.hostToContainerPath.
+            final rawDuration = await reader(hostVideoPath);
+
+            expect(rawDuration, isNotNull);
+            final verification = evaluateVideoDuration(
+              rawDuration: rawDuration,
+            );
+            // ffmpeg's actual encoded duration for a 2s request is not
+            // always exactly "2.000000" (container/codec framing can round
+            // slightly), but it must land well under the 5s Live Photo
+            // threshold, matching a genuine Live Photo pair's real-world
+            // ffprobe output.
+            expect(verification, DurationVerification.verified);
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment (build it per '
+                  'docker/tools/README.md).',
+      );
+
+      test(
+        'containerFfprobeDurationReader returns null (mirroring '
+        '2>/dev/null || true) when ffprobe cannot read the given path at '
+        'all',
+        () async {
+          final container = ToolsContainer(hostMountRoot: tempDir.path);
+          await container.start();
+          try {
+            final missingHostPath = '${tempDir.path}/does_not_exist.mp4';
+            final reader = containerFfprobeDurationReader(
+              container: container,
+            );
+            final rawDuration = await reader(missingHostPath);
+            expect(rawDuration, isNull);
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment.',
+      );
+    },
+  );
+
+  group('Docker/image availability self-check (meta-test)', () {
+    test(
+      'this test file is actually exercising real Docker, not silently '
+      'skipping — makes the skip reason visible in test output',
+      () {
+        if (!_dockerReady) {
+          // ignore: avoid_print
+          print(
+            'NOTE: Docker daemon not reachable — the "ffprobe via a real '
+            'ToolsContainer" group above was skipped, not run.',
+          );
+        } else if (!_imageReady) {
+          // ignore: avoid_print
+          print(
+            'NOTE: Docker is available but media-pipeline-tools:local is '
+            'not built — the "ffprobe via a real ToolsContainer" group '
+            'above was skipped, not run. Build it per '
+            'docker/tools/README.md.',
+          );
+        } else {
+          // ignore: avoid_print
+          print(
+            'Docker + media-pipeline-tools:local are both available — the '
+            '"ffprobe via a real ToolsContainer" group above actually ran '
+            'against a real container.',
+          );
+        }
+      },
+    );
+  });
 }
