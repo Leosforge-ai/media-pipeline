@@ -687,17 +687,13 @@ void main() {
       tempDir = await Directory.systemTemp.createTemp(
         'clean_takeout_duplicates_container_test_',
       );
-      // The `media-pipeline-tools` image runs as a fixed non-root UID
-      // (`tools`, uid 10000 — see docker/tools/Dockerfile), which will not
-      // generally match this test's own host UID. Real UID/GID mapping
-      // for bind-mounted writes is Phase 3 of issue #76 (not yet
-      // implemented); until then, this test-only fixture directory is
-      // made world-writable so the container can read the fixture files
-      // this test writes into it. This does not touch or work around
-      // anything in `lib/`/`docker/` — it's scoped to this temp test
-      // fixture only. Mirrors
-      // `test/dedupe_live_photos_test.dart`'s identical workaround.
-      await Process.run('chmod', ['0777', tempDir.path]);
+      // No chmod workaround needed here any more: ToolsContainer.start()
+      // now passes `--user <host-uid>:<host-gid>` to `docker run` (#76
+      // Phase 3, lib/src/tools_container.dart), overriding the image's
+      // baked-in fixed non-root UID (`tools`, uid 10000) so the container
+      // reads/writes as the real host user instead. See
+      // test/tools_container_test.dart's "host UID/GID mapping" group for
+      // the dedicated proof.
     });
 
     tearDown(() async {
@@ -715,9 +711,6 @@ void main() {
         final content = 'takeout-duplicate-verification-fixture-bytes';
         final hostFilePath = '${tempDir.path}/candidate.jpg';
         await File(hostFilePath).writeAsString(content);
-        // chmod after write so the container (running as a different
-        // UID) can still read it, matching this group's setUp comment.
-        await Process.run('chmod', ['0666', hostFilePath]);
 
         // Independently compute the expected hash via a real host-side
         // sha256sum (defaultFileHasher) — a cross-check computed by a
@@ -795,10 +788,6 @@ void main() {
         await duplicate.parent.create(recursive: true);
         await canonical.writeAsBytes('same-bytes-via-container'.codeUnits);
         await duplicate.writeAsBytes('same-bytes-via-container'.codeUnits);
-        // Container runs as a different UID than this test process — see
-        // this group's setUp comment.
-        await Process.run('chmod', ['-R', '0666', canonical.path]);
-        await Process.run('chmod', ['-R', '0666', duplicate.path]);
 
         final container = ToolsContainer(hostMountRoot: tempDir.path);
         await container.start();
