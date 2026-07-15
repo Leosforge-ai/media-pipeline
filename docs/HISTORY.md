@@ -1391,3 +1391,94 @@ path for its one external tool, proven against a real Docker daemon end-to-end, 
 wired into `pipeline_models.dart`/`media_pipeline_app.dart` — that remains later work. Part of
 #76, not closing it. Flagging **Cody + Astrid** review as required, per this series' established
 practice.
+
+## Phase 24 — `ToolsContainer` host UID/GID mapping, closing the #76 Phase 3 gap (2026-07-15)
+
+**Context:** Phases 21/22/23 (PRs #94/#95/#96) each independently hit the same
+permission-denied failure while writing their real-`ToolsContainer` end-to-end tests:
+`docker/tools/Dockerfile`'s image runs as a fixed non-root user (`tools`, uid 10000) as a safe
+default for the image's own standalone verification, which generally does not match the host
+test-runner's own UID — so files the container wrote onto the bind-mounted host directory came
+out owned by uid 10000, not the host user, and (symmetrically) host-created fixture files the
+fixed container uid lacked permission on failed to read from inside the container. All three
+PRs flagged this as an open Phase 3 gap and worked around it with test-only `chmod
+0777`/`0666` calls on their fixture directories/files, scoped to `test/**`, never `lib/**`.
+This phase closes that gap for real, rather than continuing to work around it.
+
+**Decision — `docker run --user <host-uid>:<host-gid>`, not an image change:**
+`ToolsContainer.start()` (`lib/src/tools_container.dart`) now passes `--user` to `docker run`,
+overriding the image's baked-in `tools` user for that one container instance — the standard
+Docker-on-Linux idiom for exactly this bind-mount-ownership problem. `docker/tools/Dockerfile`'s
+own `USER tools` default is untouched, so standalone/debugging use of the image (`docker run -it
+media-pipeline-tools:local bash`, no `--user`) behaves exactly as before; this is a per-run
+override, not an image change.
+
+- **Host UID/GID detection:** the new `ToolsContainer.detectHostUserFlag()` static method shells
+  out to `id -u`/`id -g` (Linux/macOS only; the same "shell to a small trusted binary" pattern
+  this codebase already uses throughout `dedupe_live_photos.dart`/`stitch_metadata.dart`'s
+  overridable tool seams). Output is sanity-checked as purely numeric before ever reaching a
+  `docker run` argument. Returns `null` — meaning "don't pass `--user`; fall back to the image's
+  baked-in `tools` user" — in two deliberate cases: on `Platform.isWindows` (Docker Desktop's
+  Linux VM has a fundamentally different bind-mount permission model with no direct
+  host-uid-to-container-uid passthrough; solving that properly is #76 Phase 5, not this PR), and
+  if `id` itself is unavailable or fails for any reason (a permissions *optimization*, not a
+  safety-critical path — falling back to the old baked-in-uid behavior beats refusing to start
+  the tools container at all over a detection hiccup).
+- **Not-provided-vs-explicit-null sentinel.** `ToolsContainer`'s constructor (and
+  `withSession`'s) `hostUserFlag` parameter needed to distinguish "caller didn't pass it at all"
+  (auto-detect via `detectHostUserFlag()`) from "caller explicitly passed `hostUserFlag: null`"
+  (force no `--user` override, e.g. a test simulating Windows) — a plain `String?` parameter
+  defaulting to `null` can't make that distinction, since both cases look identical inside the
+  constructor body. Solved with a private `Object` sentinel default
+  (`_hostUserFlagNotProvided`) and an `identical()` check, rather than silently collapsing the
+  two cases (which would have made "explicitly disable" impossible to test and "auto-detect"
+  impossible to distinguish from a caller bug).
+- **Verified all five bundled tools work as an arbitrary host UID with no `/etc/passwd` entry**
+  inside the container — a real, known Docker gotcha this PR did not assume away. Manually
+  verified (`docker run --user "$(id -u):$(id -g)" ...`) and then covered by a dedicated
+  Docker-gated test group (`test/tools_container_test.dart`, "ToolsContainer host UID/GID
+  mapping"): `exiftool`, `ffmpeg`/`ffprobe`, `rclone`, `czkawka_cli`, and `sha256sum` all run
+  correctly; only `whoami`/username-lookup-style operations fail (`cannot find name for user ID
+  <uid>`), and none of these five tools rely on one.
+- **Real ownership proof, not just "no error was thrown."** The same new test group starts a
+  real `ToolsContainer`, has it write a file onto the bind mount, and asserts via `stat -c %u`
+  that the resulting host-side file is owned by the real host UID (cross-checked against `id
+  -u`), not uid 10000 — and separately proves a pre-existing host-owned fixture file (created
+  with no `chmod`) is readable from inside the container without a permission error.
+- **Removed the chmod workarounds** in `test/dedupe_live_photos_test.dart`,
+  `test/stitch_metadata_test.dart` (both the `tempDir`-level chmod and the
+  `chmodThenExtract`-wrapped archive extractors), and `test/clean_takeout_duplicates_test.dart`
+  (all three chmod call sites) — all four Docker-gated real-container test groups from Phases
+  21-23 now pass with zero chmod calls, which is this PR's own proof the fix works for the right
+  reason (correct UID mapping), not that the removed assertions just happened to stop mattering.
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green (350 tests, up
+from 343 before this PR — 7 new tests: 5 in the new "host UID/GID mapping" group, 2 in a new
+"detectHostUserFlag" pure-logic group; 1 of those 7 is a Windows-only test that skips on this
+Linux CI environment), all real-Docker groups (including the chmod-free reruns of Phases 21-23's
+own real-container tests) actually ran against a real Docker daemon and the
+`media-pipeline-tools:local` image in this environment, not skipped.
+
+**Review addendum — visible fallback warning:** Astrid's review flagged that the "shouldn't
+happen on a real Linux/macOS host" detection-failure branches of `detectHostUserFlag()`
+(`id -u`/`id -g` erroring, producing non-numeric output, or the binary being missing entirely)
+fell back to the old baked-in-uid-10000 behavior silently — a user hitting that edge case would
+get the exact permission confusion this phase exists to eliminate, with no indication why.
+Fixed by adding a `stderr.writeln('WARNING: ...')` in those three branches only, reusing
+`stitch_metadata.dart`'s existing `WARNING: ` idiom — deliberately not added to the
+`Platform.isWindows` branch, since that fallback is expected/documented, not a hiccup.
+
+**Out of scope:** Windows UID/GID handling (explicitly deferred to #76 Phase 5, per this PR's
+task brief) — `detectHostUserFlag()` returns `null` on Windows rather than attempting a mapping
+that wouldn't mean the same thing under Docker Desktop's Linux VM. No consumer wiring changes —
+this only changes how `ToolsContainer.start()` launches the container; the four already-migrated
+consumers (`dedupe_live_photos.dart`, `stitch_metadata.dart`, `clean_takeout_duplicates.dart`)
+needed no `lib/**` changes at all, only their tests' chmod workarounds came out.
+
+**Outcome:** Closes the #76 Phase 3 permission-denied gap independently reproduced in PRs
+#94/#95/#96 — every container-routed tool invocation across all four migrated consumers now runs
+as the real host user by default on Linux/macOS, with no test-only chmod workaround required.
+Part of #76 (tracking issue — stays open); this is Phase 3 of that issue's roadmap, not the
+whole issue. Flagging **Cody + Astrid** review as required — this changes how every
+container-routed tool invocation runs (`docker run`'s own argument list), a cross-cutting change
+underneath all four already-reviewed consumer migrations.

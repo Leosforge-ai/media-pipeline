@@ -2,6 +2,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+/// Private sentinel used by [ToolsContainer]'s constructor to distinguish
+/// "the `hostUserFlag` parameter wasn't passed at all" (auto-detect) from
+/// "it was explicitly passed as `null`" (force no `--user` override) — see
+/// the constructor's own doc comment on why a plain `String?` default of
+/// `null` can't make that distinction.
+const Object _hostUserFlagNotProvided = Object();
+
 /// Container-orchestration plumbing for Phase 2 of issue #76 (Design A —
 /// Docker-containerized tool runtime).
 ///
@@ -72,6 +79,37 @@ import 'dart:math';
 /// skip) already treats as separate, platform-gated work. This PR's own
 /// Docker-backed tests are Linux-gated the same way (see
 /// `test/tools_container_test.dart`).
+///
+/// ## Host UID/GID mapping (#76 Phase 3)
+///
+/// `docker/tools/Dockerfile` bakes in a fixed non-root user (`tools`, uid
+/// 10000) as a safe default for the image's own standalone verification.
+/// Left alone, that means every file the container creates on the
+/// bind-mounted host directory ends up owned by uid 10000 on the host — not
+/// the real host user — and, symmetrically, a host-created file the
+/// container's fixed uid lacks permission on fails to read/write from
+/// inside the container. PRs #94/#95/#96 (the first three consumer
+/// migrations) each independently hit this permission-denied failure and
+/// worked around it with a test-only `chmod 0777`/`0666` on their fixture
+/// directories, flagging it as an open Phase 3 gap each time.
+///
+/// [start] closes that gap by passing `--user <host-uid>:<host-gid>` to
+/// `docker run`, overriding the image's baked-in `tools` user for this one
+/// container instance — a per-run override, the standard Docker-on-Linux
+/// idiom for exactly this bind-mount-ownership problem; the image's own
+/// `USER tools` default (`docker/tools/Dockerfile`) is untouched, so
+/// standalone/debugging use of the image (`docker run -it
+/// media-pipeline-tools:local bash`, no `--user`) behaves exactly as
+/// before. [detectHostUserFlag] resolves the current process's real
+/// UID/GID via `id -u`/`id -g` (Linux/macOS only — see its own doc comment
+/// for why Windows and detection-failure both intentionally fall back to
+/// `null`, i.e. no `--user` override, rather than throwing). All four
+/// bundled tools (`exiftool`, `ffmpeg`/`ffprobe`, `rclone`, `czkawka_cli`)
+/// plus `sha256sum` were verified running correctly as an arbitrary host
+/// UID with no corresponding `/etc/passwd` entry inside the container —
+/// only `whoami`/username-lookup style operations fail in that situation
+/// (`cannot find name for user ID <uid>`), and none of these tools rely on
+/// one.
 class ToolsContainer {
   ToolsContainer({
     required this.hostMountRoot,
@@ -79,7 +117,18 @@ class ToolsContainer {
     this.image = kDefaultToolsImage,
     this.dockerBin = 'docker',
     DockerProcessRunner? runner,
+    // `Object?` with a private sentinel default (not `String?` defaulting
+    // to `null`) so this constructor can tell "caller didn't pass
+    // hostUserFlag at all -> auto-detect" apart from "caller explicitly
+    // passed hostUserFlag: null -> force no --user override" (e.g. a test
+    // simulating Windows). A plain `String? hostUserFlag` parameter can't
+    // make that distinction — both cases would otherwise look identical
+    // (`null`) inside the constructor body.
+    Object? hostUserFlag = _hostUserFlagNotProvided,
   }) : runner = runner ?? _defaultRunner(dockerBin),
+       hostUserFlag = identical(hostUserFlag, _hostUserFlagNotProvided)
+           ? detectHostUserFlag()
+           : hostUserFlag as String?,
        // Normalized (not just trailing-slash-stripped) up front, so a root
        // itself constructed with `.`/`..` segments doesn't skew every later
        // boundary check — see [_normalizeAbsolutePath]'s doc comment. This
@@ -119,6 +168,16 @@ class ToolsContainer {
   /// Docker daemon for every test (the real-daemon tests in
   /// `test/tools_container_test.dart` are a separate, Docker-gated group).
   final DockerProcessRunner runner;
+
+  /// The `docker run --user` value [start] passes, e.g. `"1000:1000"`, or
+  /// `null` to leave `docker/tools/Dockerfile`'s baked-in `tools` user
+  /// (uid 10000) untouched. Defaults to [detectHostUserFlag]'s result;
+  /// overridable so tests can inject a fixed value without shelling out to
+  /// `id`, or force `null` to exercise the "no override" path explicitly
+  /// (e.g. simulating Windows, where [detectHostUserFlag] itself always
+  /// returns `null`). See this class's top-level "Host UID/GID mapping"
+  /// doc section for the full rationale.
+  final String? hostUserFlag;
 
   final String _normalizedHostRoot;
   final String _normalizedContainerRoot;
@@ -181,6 +240,14 @@ class ToolsContainer {
       '--init',
       '--label',
       '$kToolsContainerSessionLabel=$sessionLabel',
+      // Overrides `docker/tools/Dockerfile`'s baked-in `tools` (uid 10000)
+      // user for this container instance so bind-mounted file ownership
+      // matches the real host user — see this file's top-level "Host
+      // UID/GID mapping" doc section. Omitted entirely (falling back to
+      // the image's default user) when [hostUserFlag] is `null` (Windows,
+      // or UID/GID detection failed) — never passed as an empty/malformed
+      // value.
+      if (hostUserFlag != null) ...['--user', hostUserFlag!],
       '-v',
       '$hostMountRoot:$containerMountPath',
       image,
@@ -439,6 +506,10 @@ class ToolsContainer {
     String image = kDefaultToolsImage,
     String dockerBin = 'docker',
     DockerProcessRunner? runner,
+    // Same not-provided-vs-explicit-null sentinel as the constructor (see
+    // its doc comment) — a caller that doesn't pass this at all must still
+    // get auto-detection, not a forced "no --user" override.
+    Object? hostUserFlag = _hostUserFlagNotProvided,
   }) async {
     final container = ToolsContainer(
       hostMountRoot: hostMountRoot,
@@ -446,6 +517,7 @@ class ToolsContainer {
       image: image,
       dockerBin: dockerBin,
       runner: runner,
+      hostUserFlag: hostUserFlag,
     );
     await container.start();
     try {
@@ -465,6 +537,78 @@ class ToolsContainer {
       );
     };
   }
+
+  /// Detects the current process's real UID/GID as a `"uid:gid"` string
+  /// suitable for `docker run --user` (see this class's top-level "Host
+  /// UID/GID mapping" doc section for why [start] needs this at all).
+  ///
+  /// Returns `null` — meaning "don't pass `--user`; leave
+  /// `docker/tools/Dockerfile`'s baked-in `tools` (uid 10000) user in
+  /// effect" — in two cases:
+  ///
+  /// - **Windows** ([Platform.isWindows]): Docker Desktop's Linux VM has a
+  ///   fundamentally different bind-mount permission model than a native
+  ///   Linux Docker daemon (there's no direct host-uid-to-container-uid
+  ///   passthrough the way there is on Linux, and macOS's `osxfs`/`gRPC
+  ///   FUSE` mount already handles ownership transparently without this
+  ///   flag). Solving Windows UID mapping properly is out of scope for this
+  ///   PR (#76 Phase 3 is Linux/macOS-focused; Windows end-to-end
+  ///   verification is Phase 5) — detection is skipped outright here rather
+  ///   than attempting (and likely mis-detecting) a UID/GID pair that
+  ///   wouldn't mean the same thing there.
+  /// - **`id -u`/`id -g` unavailable, erroring, or producing unexpected
+  ///   output**: shouldn't happen on a real Linux/macOS host (`id` is part
+  ///   of the base OS on both), but this is a permissions *optimization*,
+  ///   not a safety-critical path — falling back to the image's existing
+  ///   baked-in-uid behavior is strictly better than refusing to start the
+  ///   tools container at all over a detection hiccup. Output is also
+  ///   sanity-checked as purely numeric before use, so malformed `id`
+  ///   output (e.g. from an unexpected shell alias or wrapper) can never
+  ///   reach a `docker run` argument unvalidated.
+  static String? detectHostUserFlag() {
+    if (Platform.isWindows) return null;
+    try {
+      final uidResult = Process.runSync('id', ['-u']);
+      final gidResult = Process.runSync('id', ['-g']);
+      if (uidResult.exitCode != 0 || gidResult.exitCode != 0) {
+        _warnDetectionFallback('id -u/-g exited non-zero');
+        return null;
+      }
+      final uid = uidResult.stdout.toString().trim();
+      final gid = gidResult.stdout.toString().trim();
+      if (!_isNumericId(uid) || !_isNumericId(gid)) {
+        _warnDetectionFallback('id -u/-g produced non-numeric output');
+        return null;
+      }
+      return '$uid:$gid';
+    } catch (e) {
+      // `id` missing entirely, or any other Process.runSync failure (e.g.
+      // permission to spawn processes at all) — fall back to "no
+      // override", per this method's doc comment.
+      _warnDetectionFallback('failed to run id ($e)');
+      return null;
+    }
+  }
+
+  /// Surfaces the "shouldn't happen on a real Linux/macOS host" detection
+  /// failure to stderr, mirroring `stitch_metadata.dart`'s `WARNING: `
+  /// idiom. Without this, a host with a broken/missing `id` binary would
+  /// silently fall back to the image's baked-in uid-10000 user — reproducing
+  /// the exact permission confusion this PR exists to eliminate, with no
+  /// indication of why. Not called for the Windows branch above, since that
+  /// fallback is expected/documented, not a hiccup.
+  static void _warnDetectionFallback(String reason) {
+    stderr.writeln(
+      'WARNING: could not detect host UID/GID ($reason); tools container '
+      'will run as its default image user, so files it writes into '
+      'bind-mounted host directories may not be owned by your user.',
+    );
+  }
+
+  static final RegExp _numericIdPattern = RegExp(r'^\d+$');
+
+  static bool _isNumericId(String value) =>
+      value.isNotEmpty && _numericIdPattern.hasMatch(value);
 }
 
 /// The `media-pipeline-tools` image tag [ToolsContainer] runs by default.

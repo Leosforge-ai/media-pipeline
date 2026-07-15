@@ -1164,15 +1164,13 @@ void main() {
         tempDir = await Directory.systemTemp.createTemp(
           'stitch_metadata_container_test_',
         );
-        // Same UID-mismatch workaround as
-        // test/dedupe_live_photos_test.dart's real-ToolsContainer group:
-        // the `media-pipeline-tools` image runs as a fixed non-root UID
-        // (`tools`, uid 10000), which will not generally match this test's
-        // own host UID. Real UID/GID mapping is Phase 3 of issue #76, not
-        // yet implemented — until then, this test-only fixture directory is
-        // made world-writable so the container can write into it. Scoped to
-        // this temp test fixture only.
-        await Process.run('chmod', ['0777', tempDir.path]);
+        // No chmod workaround needed here any more: ToolsContainer.start()
+        // now passes `--user <host-uid>:<host-gid>` to `docker run` (#76
+        // Phase 3, lib/src/tools_container.dart), overriding the image's
+        // baked-in fixed non-root UID (`tools`, uid 10000) so the container
+        // reads/writes as the real host user instead. See
+        // test/tools_container_test.dart's "host UID/GID mapping" group
+        // for the dedicated proof.
       });
 
       tearDown(() async {
@@ -1195,14 +1193,6 @@ void main() {
           try {
             final srcDir = Directory('$hdPath/src/Google Photos');
             await srcDir.create(recursive: true);
-            // Newly created subdirectories don't inherit tempDir's own
-            // 0777 mode (Directory.create uses the process umask), so the
-            // container's non-root uid still can't write into srcDir
-            // without this — same UID-mismatch workaround as setUp's
-            // chmod on tempDir itself, just applied recursively since
-            // ffmpeg needs to write a new file *inside* this nested
-            // directory.
-            await Process.run('chmod', ['-R', '0777', srcDir.path]);
 
             // Generate a real, genuinely-encoded 1-frame JPEG using the
             // pinned image's own ffmpeg (not a pre-baked fixture checked
@@ -1274,40 +1264,21 @@ void main() {
 
             // extractArchive() (lib/src/stitch_metadata.dart) creates the
             // extraction destDir on the HOST, with the host process's
-            // default umask — not writable by the container's fixed
-            // non-root uid (10000). Real UID/GID mapping for bind-mounted
-            // writes is Phase 3 of #76 and not yet implemented (same
-            // known-open item test/dedupe_live_photos_test.dart's real
-            // ToolsContainer group documents for its own fixture
-            // directory). Since destDir is created *inside*
-            // extractArchive/MetadataStitcher.run — not something this test
-            // can pre-chmod before it exists — this wraps the real
-            // container extractors with a chmod of destDir right after
-            // extractArchive creates it and right before unzip/tar actually
-            // writes into it, scoped to this test fixture only (not a
-            // change to lib/**).
-            final rawZipExtractor = containerZipExtractor(
-              container: container,
-            );
-            final rawTarExtractor = containerTarExtractor(
-              container: container,
-            );
-            Future<void> chmodThenExtract(
-              ArchiveExtractRunner inner,
-              String archivePath,
-              String destDir,
-            ) async {
-              await Process.run('chmod', ['-R', '0777', destDir]);
-              await inner(archivePath, destDir);
-            }
-
+            // default umask. Previously (#76 Phase 3 not yet implemented)
+            // that directory wasn't writable by the container's fixed
+            // non-root uid (10000), requiring a chmod-after-create
+            // workaround here; now that ToolsContainer.start() passes
+            // `--user <host-uid>:<host-gid>` to `docker run`, the container
+            // runs as the same uid that created destDir, so no workaround
+            // is needed — the extractors are used unwrapped, straight from
+            // the container-routed seams.
             final stitcher = MetadataStitcher(
               exiftool: containerExiftoolRunner(container: container),
               archiveExtractor: TakeoutArchiveExtractor(
                 zipLister: containerZipLister(container: container),
-                zipExtractor: (a, d) => chmodThenExtract(rawZipExtractor, a, d),
+                zipExtractor: containerZipExtractor(container: container),
                 tarLister: containerTarLister(container: container),
-                tarExtractor: (a, d) => chmodThenExtract(rawTarExtractor, a, d),
+                tarExtractor: containerTarExtractor(container: container),
               ),
             );
             final summary = await stitcher.run(hdPath);

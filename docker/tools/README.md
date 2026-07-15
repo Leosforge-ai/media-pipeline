@@ -117,7 +117,13 @@ docker run --rm -it media-pipeline-tools:local bash
 
 The image runs as a non-root user (`tools`, uid 10000) with `WORKDIR /work` by default — this
 is a safe default for standalone verification so any files the container creates aren't
-root-owned; Phase 3 of #76 covers proper host UID/GID mapping for the real bind-mount use case.
+root-owned. For the real bind-mount use case, `ToolsContainer.start()`
+(`lib/src/tools_container.dart`, #76 Phase 3) overrides this at `docker run` time with `--user
+<host-uid>:<host-gid>` (auto-detected via `id -u`/`id -g` on Linux/macOS), so files the
+container creates on a bind-mounted host directory come out owned by the real host user instead
+of uid 10000. That override only applies when going through `ToolsContainer`; a bare `docker
+run` like the one above still runs as the baked-in `tools` user, unchanged. Windows UID/GID
+handling under Docker Desktop's Linux VM is a different problem and remains open (#76 Phase 5).
 
 To run a single tool without a shell:
 

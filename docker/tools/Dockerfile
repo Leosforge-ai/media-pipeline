@@ -89,10 +89,13 @@ RUN set -eux; \
     install -m 755 "${tmp}" /usr/local/bin/czkawka_cli; \
     rm -f "${tmp}"
 
-# Non-root: Phase 2 will bind-mount host media in; run as a fixed unprivileged
-# user by default so files this container creates aren't root-owned. Phase 3 of
-# #76 covers UID/GID mapping properly (host-user matching) — this is just a safe
-# default for Phase 1's standalone verification, not the final answer.
+# Non-root: Phase 2 bind-mounts host media in; run as a fixed unprivileged user
+# by default so files this container creates aren't root-owned when the image
+# is run standalone (e.g. the "Debugging" section in docker/tools/README.md).
+# #76 Phase 3 (lib/src/tools_container.dart's ToolsContainer.start()) overrides
+# this uid at `docker run` time with `--user <host-uid>:<host-gid>` for the real
+# bind-mount use case, so this baked-in uid is only ever the *fallback*, not the
+# uid real pipeline runs actually execute as on Linux/macOS.
 RUN useradd --create-home --uid 10000 --shell /bin/bash tools
 USER tools
 WORKDIR /work
