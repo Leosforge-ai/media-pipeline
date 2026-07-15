@@ -509,8 +509,9 @@ void main() {
     );
 
     test(
-      'confirm mode never clobbers an existing trash destination '
-      '(mv -n semantics)',
+      'confirm mode never leaves a verified redundant video un-moved on '
+      "collision: a numbered suffix is used instead, matching Bash's "
+      'unique_destination()',
       () async {
         final still = File('$targetDir/IMG_1234.HEIC');
         final video = File('$targetDir/IMG_1234.MOV');
@@ -533,13 +534,23 @@ void main() {
         final summary = await cleaner.run(targetDir: targetDir, confirm: true);
 
         final outcome = summary.outcomes.single;
-        expect(outcome.action, LivePhotoPairAction.skippedExisting);
+        expect(outcome.action, LivePhotoPairAction.movedWithSuffix);
+        // The suffixed destination is `<dst-without-ext>_1<ext>`.
+        final expectedSuffixedDst =
+            '${dst.substring(0, dst.length - 4)}_1'
+            '${dst.substring(dst.length - 4)}';
+        expect(outcome.destinationPath, expectedSuffixedDst);
         expect(
           await video.exists(),
-          isTrue,
-          reason: 'source stays put on collision',
+          isFalse,
+          reason: 'source is always moved, never left in place, matching '
+              "Bash's guarantee that a move into the trash always succeeds",
         );
         expect(await File(dst).readAsBytes(), 'already-there'.codeUnits);
+        expect(
+          await File(expectedSuffixedDst).readAsBytes(),
+          'video-bytes'.codeUnits,
+        );
       },
     );
 
