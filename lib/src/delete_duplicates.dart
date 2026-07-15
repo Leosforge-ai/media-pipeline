@@ -63,16 +63,17 @@ import 'filesystem_ops.dart';
 /// ## Design decision: trash-move collision handling
 ///
 /// The Bash script's own `trash_file()` resolves a destination collision by
-/// appending a numbered suffix (`_1`, `_2`, ...) and always moving. This
-/// port instead uses [SafeFileMover.moveNoClobber], which — like
-/// `11_restore_from_trash.sh`'s Dart port — skips the move and leaves the
-/// source in place on collision (`mv -n` semantics) rather than picking a
-/// different destination name. This is the shared-primitive migration path
-/// `filesystem_ops.dart`'s own doc comment already names 06/12/13 as
-/// candidates for; it is a deliberate, safety-neutral-or-safer behavioral
-/// difference (never silently invents a slightly-different filename on
-/// collision) and does not affect the keep/trash *decision* logic that the
-/// Bash-vs-Dart parity test in `test/delete_duplicates_test.dart` verifies.
+/// appending a numbered suffix (`_1`, `_2`, ...) and always moving — see
+/// `unique_destination`-equivalent logic inline in `trash_file()`. This port
+/// now matches that exactly via [SafeFileMover.moveRenamingOnCollision]
+/// (Leo's #76/#77 review decision, superseding an earlier revision of this
+/// port that used [SafeFileMover.moveNoClobber] and skipped on collision —
+/// see `filesystem_ops.dart`'s top-level doc comment for the full
+/// rationale). The move never leaves a trash candidate un-moved on
+/// collision; [DuplicateFileOutcome.destinationPath] reflects the actual
+/// path used, which may carry a numbered suffix. This does not affect the
+/// keep/trash *decision* logic that the Bash-vs-Dart parity test in
+/// `test/delete_duplicates_test.dart` verifies.
 
 // ---------------------------------------------------------------------------
 // Pure logic: keep-scoring heuristic
@@ -254,10 +255,11 @@ enum DuplicateFileAction {
   /// Confirm mode: the file was actually moved to `$MEDIA_TRASH`.
   trashed,
 
-  /// Confirm mode: the destination already existed, so — matching
-  /// [SafeFileMover.moveNoClobber]'s no-clobber semantics — the file was
-  /// left in place, untouched.
-  skippedExisting,
+  /// Confirm mode: the desired destination already existed, so — matching
+  /// [SafeFileMover.moveRenamingOnCollision]'s numbered-suffix semantics —
+  /// the file was moved to a suffixed alternative instead. See
+  /// [DuplicateFileOutcome.destinationPath] for the actual path used.
+  trashedWithSuffix,
 
   /// The path no longer exists on disk (already moved/deleted out of band
   /// since the report was generated). Mirrors the Bash script's
@@ -346,9 +348,9 @@ String trashDestinationPath({
 ///
 /// Dry-run is the default (`confirm: false`), matching the Bash script and
 /// every other confirm-gated script in this pipeline. Nothing is ever
-/// deleted: every action is either a no-op (dry-run, missing file, or
-/// skip-existing) or a move from the original path to
-/// [trashDestinationPath].
+/// deleted: every action is either a no-op (dry-run or missing file) or a
+/// move from the original path to [trashDestinationPath] (possibly suffixed
+/// — see [DuplicateFileAction.trashedWithSuffix]).
 class DuplicateDeleter {
   const DuplicateDeleter({
     required this.stagingRoot,
@@ -375,7 +377,7 @@ class DuplicateDeleter {
   /// [confirm] defaults to `false` (dry-run): every trash candidate is
   /// reported as [DuplicateFileAction.wouldTrash] and nothing on disk is
   /// touched. When `true`, each trash candidate is moved via
-  /// [SafeFileMover.moveNoClobber].
+  /// [SafeFileMover.moveRenamingOnCollision].
   Future<List<DuplicateReportOutcome>> run({
     required List<String> reportPaths,
     bool confirm = false,
@@ -462,13 +464,13 @@ class DuplicateDeleter {
       );
     }
 
-    final result = await mover.moveNoClobber(src, dst);
+    final outcome = await mover.moveRenamingOnCollision(src, dst);
     return DuplicateFileOutcome(
       path: src,
-      action: result == MoveResult.moved
+      action: outcome.result == MoveResult.moved
           ? DuplicateFileAction.trashed
-          : DuplicateFileAction.skippedExisting,
-      destinationPath: dst,
+          : DuplicateFileAction.trashedWithSuffix,
+      destinationPath: outcome.destinationPath,
     );
   }
 }

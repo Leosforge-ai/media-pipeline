@@ -474,8 +474,9 @@ void main() {
     );
 
     test(
-      'confirm mode never clobbers an existing destination '
-      '(mv -n semantics)',
+      'confirm mode never leaves a trash candidate un-moved on collision: '
+      'a numbered suffix is used instead, matching Bash\'s '
+      'unique_destination()',
       () async {
         final a = File('$stagingRoot/a.jpg');
         final b = File('$stagingRoot/b.jpg');
@@ -506,9 +507,20 @@ void main() {
         );
 
         final outcome = results.single.groups.single.trashOutcomes.single;
-        expect(outcome.action, DuplicateFileAction.skippedExisting);
-        expect(await b.exists(), isTrue, reason: 'source stays put on skip');
+        expect(outcome.action, DuplicateFileAction.trashedWithSuffix);
+        // The suffixed destination is `<dst-without-ext>_1<ext>`.
+        final expectedSuffixedDst =
+            '${dst.substring(0, dst.length - 4)}_1'
+            '${dst.substring(dst.length - 4)}';
+        expect(outcome.destinationPath, expectedSuffixedDst);
+        expect(
+          await b.exists(),
+          isFalse,
+          reason: 'source is always moved, never left in place, matching '
+              "Bash's guarantee that a move into the trash always succeeds",
+        );
         expect(await File(dst).readAsString(), 'already-there');
+        expect(await File(expectedSuffixedDst).readAsString(), 'second');
       },
     );
   });

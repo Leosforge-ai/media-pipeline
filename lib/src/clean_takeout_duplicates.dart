@@ -64,15 +64,16 @@ import 'filesystem_ops.dart';
 ///
 /// The Bash script's own `unique_destination` resolves a destination
 /// collision by appending a numbered suffix (`_1`, `_2`, ...) and always
-/// moving. This port instead uses [SafeFileMover.moveNoClobber], which —
-/// like the `11`/`06` Dart ports before it — skips the move and leaves the
-/// source in place on collision (`mv -n` semantics) rather than inventing a
-/// different destination filename. This is the same shared-primitive
-/// migration `filesystem_ops.dart`'s own doc comment names 12/13 as
-/// candidates for; it is a deliberate, safety-neutral-or-safer behavioral
-/// difference and does not affect the verify/skip *decision* logic that the
-/// Bash-vs-Dart parity test in `test/clean_takeout_duplicates_test.dart`
-/// verifies.
+/// moving. This port now matches that exactly via
+/// [SafeFileMover.moveRenamingOnCollision] (Leo's #76/#77 review decision,
+/// superseding an earlier revision of this port that used
+/// [SafeFileMover.moveNoClobber] and skipped on collision — see
+/// `filesystem_ops.dart`'s top-level doc comment for the full rationale).
+/// The move never leaves a verified duplicate un-moved on collision;
+/// [TakeoutDuplicateOutcome.destinationPath] reflects the actual path used,
+/// which may carry a numbered suffix. This does not affect the verify/skip
+/// *decision* logic that the Bash-vs-Dart parity test in
+/// `test/clean_takeout_duplicates_test.dart` verifies.
 
 // ---------------------------------------------------------------------------
 // Typed confirmation phrase (see design decision above)
@@ -258,11 +259,12 @@ enum TakeoutDuplicateAction {
   /// Confirm mode: the file was actually moved to `$MEDIA_TRASH`.
   moved,
 
-  /// Confirm mode: the destination already existed, so — matching
-  /// [SafeFileMover.moveNoClobber]'s no-clobber semantics (see this file's
-  /// "trash-move collision handling" design decision above) — the file was
-  /// left in place, untouched.
-  skippedExisting,
+  /// Confirm mode: the desired destination already existed, so — matching
+  /// [SafeFileMover.moveRenamingOnCollision]'s numbered-suffix semantics
+  /// (see this file's "trash-move collision handling" design decision
+  /// above) — the file was moved to a suffixed alternative instead. See
+  /// [TakeoutDuplicateOutcome.destinationPath] for the actual path used.
+  movedWithSuffix,
 
   /// No canonical counterpart exists at all. Mirrors
   /// `Missing canonical for $year: ...`.
@@ -394,9 +396,10 @@ class TakeoutCleanupSummary {
 ///
 /// Dry-run is the default (`confirm: false`), matching the Bash script and
 /// every other confirm-gated script in this pipeline. Nothing is ever
-/// deleted: every action is either a no-op (dry-run, missing/mismatched
-/// canonical, or skip-existing) or a move from the duplicate's original path
-/// to [trashDestinationPath].
+/// deleted: every action is either a no-op (dry-run or missing/mismatched
+/// canonical) or a move from the duplicate's original path to
+/// [trashDestinationPath] (possibly suffixed — see
+/// [TakeoutDuplicateAction.movedWithSuffix]).
 class TakeoutDuplicateCleaner {
   const TakeoutDuplicateCleaner({
     required this.trashRoot,
@@ -530,7 +533,7 @@ class TakeoutDuplicateCleaner {
             skippedHash++;
           case TakeoutDuplicateAction.wouldMove:
           case TakeoutDuplicateAction.moved:
-          case TakeoutDuplicateAction.skippedExisting:
+          case TakeoutDuplicateAction.movedWithSuffix:
             inspected++;
             verified++;
         }
@@ -615,14 +618,17 @@ class TakeoutDuplicateCleaner {
             destinationPath: dst,
           );
         }
-        final result = await mover.moveNoClobber(duplicatePath, dst);
+        final outcome = await mover.moveRenamingOnCollision(
+          duplicatePath,
+          dst,
+        );
         return TakeoutDuplicateOutcome(
           duplicatePath: duplicatePath,
           canonicalPath: canonicalPath,
-          action: result == MoveResult.moved
+          action: outcome.result == MoveResult.moved
               ? TakeoutDuplicateAction.moved
-              : TakeoutDuplicateAction.skippedExisting,
-          destinationPath: dst,
+              : TakeoutDuplicateAction.movedWithSuffix,
+          destinationPath: outcome.destinationPath,
         );
     }
   }

@@ -83,12 +83,15 @@ import 'filesystem_ops.dart';
 ///
 /// The Bash script's own `unique_destination` resolves a destination
 /// collision by appending a numbered suffix (`_1`, `_2`, ...) and always
-/// moving. This port instead uses [SafeFileMover.moveNoClobber], which —
-/// like the `11`/`06`/`12` Dart ports before it — skips the move and leaves
-/// the source in place on collision (`mv -n` semantics) rather than
-/// inventing a different destination filename. This is a deliberate,
-/// safety-neutral-or-safer behavioral difference and does not affect the
-/// verify/skip *decision* logic that the Bash-vs-Dart parity test in
+/// moving. This port now matches that exactly via
+/// [SafeFileMover.moveRenamingOnCollision] (Leo's #76/#77 review decision,
+/// superseding an earlier revision of this port that used
+/// [SafeFileMover.moveNoClobber] and skipped on collision — see
+/// `filesystem_ops.dart`'s top-level doc comment for the full rationale).
+/// The move never leaves a verified redundant video un-moved on collision;
+/// [LivePhotoPairOutcome.destinationPath] reflects the actual path used,
+/// which may carry a numbered suffix. This does not affect the verify/skip
+/// *decision* logic that the Bash-vs-Dart parity test in
 /// `test/dedupe_live_photos_test.dart` verifies.
 ///
 /// ## Explicit non-goal (matching the original script's own scope boundary)
@@ -421,11 +424,12 @@ enum LivePhotoPairAction {
   /// Confirm mode: the video was actually moved to `$MEDIA_TRASH`.
   moved,
 
-  /// Confirm mode: the destination already existed, so — matching
-  /// [SafeFileMover.moveNoClobber]'s no-clobber semantics (see this file's
-  /// "trash-move collision handling" design decision above) — the file was
-  /// left in place, untouched.
-  skippedExisting,
+  /// Confirm mode: the desired destination already existed, so — matching
+  /// [SafeFileMover.moveRenamingOnCollision]'s numbered-suffix semantics
+  /// (see this file's "trash-move collision handling" design decision
+  /// above) — the file was moved to a suffixed alternative instead. See
+  /// [LivePhotoPairOutcome.destinationPath] for the actual path used.
+  movedWithSuffix,
 
   /// No paired still exists for this video at all. Mirrors
   /// `No paired still for video, skipping: ...`.
@@ -470,7 +474,7 @@ class LivePhotoPairOutcome {
 
   /// The (would-be) destination under `$MEDIA_TRASH`. Non-null only for
   /// [LivePhotoPairAction.wouldMove]/[LivePhotoPairAction.moved]/
-  /// [LivePhotoPairAction.skippedExisting].
+  /// [LivePhotoPairAction.movedWithSuffix].
   final String? destinationPath;
 
   @override
@@ -531,8 +535,9 @@ class LivePhotoDedupeSummary {
 /// Dry-run is the default (`confirm: false`), matching the Bash script and
 /// every other confirm-gated script in this pipeline. Nothing is ever
 /// deleted: every action is either a no-op (dry-run, missing-still,
-/// too-long, ambiguous, or skip-existing) or a move from the video's
-/// original path to [trashDestinationPath].
+/// too-long, or ambiguous) or a move from the video's original path to
+/// [trashDestinationPath] (possibly suffixed — see
+/// [LivePhotoPairAction.movedWithSuffix]).
 class LivePhotoDedupeCleaner {
   LivePhotoDedupeCleaner({
     required this.trashRoot,
@@ -774,15 +779,15 @@ class LivePhotoDedupeCleaner {
       );
     }
 
-    final result = await mover.moveNoClobber(videoPath, dst);
+    final outcome = await mover.moveRenamingOnCollision(videoPath, dst);
     return LivePhotoPairOutcome(
       videoPath: videoPath,
       stillPath: stillPath,
-      action: result == MoveResult.moved
+      action: outcome.result == MoveResult.moved
           ? LivePhotoPairAction.moved
-          : LivePhotoPairAction.skippedExisting,
+          : LivePhotoPairAction.movedWithSuffix,
       reason: reason,
-      destinationPath: dst,
+      destinationPath: outcome.destinationPath,
     );
   }
 }
