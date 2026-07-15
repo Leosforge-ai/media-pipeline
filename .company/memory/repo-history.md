@@ -264,3 +264,78 @@ RESUME AT: #76 Phase 2 — wire the Dart orchestration to the tools
 container (the actual "swap Bash for Dart in production" step Astrid
 flagged as the real risk). This is where the accumulated Phase 0 work
 starts actually mattering to what runs on Leo's real drive.
+
+## 2026-07-15 — #76 Phase 2 tool-container plumbing + all 4 consumer migrations done
+
+Same Sofie → Cody+Astrid (two real separate dispatches) → merge pattern,
+now with real Docker available and used for genuine verification
+throughout (not just code reading).
+
+- **PR #93** — `lib/src/tools_container.dart` (`ToolsContainer`): long-lived
+  `docker exec` session into the Phase-1 tools image, host↔container path
+  translation. Review found a real gap: `..` traversal wasn't rejected
+  (only sibling-directory prefix collisions were) — fixed with
+  normalize-then-boundary-check, Cody independently re-verified with his
+  own repro plus 5 additional adversarial variants. Also found/fixed a
+  real container-lifecycle bug: bare `sleep infinity` as PID 1 doesn't
+  respond to SIGTERM (`docker stop` was eating a full ~10s grace timeout
+  every session) — fixed with `--init` + explicit `docker rm -f`, Astrid
+  independently reproduced the 10s-vs-0.15s timing difference live.
+- **PR #94** — first real consumer migration: `dedupe_live_photos.dart`'s
+  `ffprobe` now routes through the container. Established the pattern:
+  hard cutover (no host fallback — Docker's already required for Immich),
+  parity test decoupled from exec mechanism via a marker-file fake. Hit a
+  real UID/GID permission mismatch (container's fixed non-root uid vs host
+  test-runner) — confirmed as the already-tracked Phase 3 item, not new.
+- **PR #95** — hardest migration: `stitch_metadata.dart`'s `unzip`/`tar`
+  archive extraction + `exiftool`, now container-routed. Composes TWO
+  independent path-safety mechanisms (archive-member zip-slip validation +
+  container mount-boundary check) — Cody built a real adversarial zip via
+  Python `zipfile` (bypassing the `zip` CLI's own refusal to create such a
+  path) and confirmed it's genuinely blocked end-to-end against a live
+  container. Hit the same UID/GID gap from the WRITE side this time
+  (extraction target, not just ffprobe's read side) — Astrid traced the
+  actual failure mode (clean throw + `finally` rmtree of the partial
+  extraction, source archive only deleted after success) and confirmed no
+  corruption risk, still the same tracked Phase 3 item.
+- **PR #96** — last migration: `clean_takeout_duplicates.dart`'s
+  `sha256sum`, confirmed the simplest of the four as predicted. Also fixed
+  a real documentation gap: `sha256sum` was present in the tools image
+  only as an undocumented transitive coreutils dependency of the base
+  image, not formally pinned like the other four tools — resolved via
+  documentation (coreutils is Debian `Essential: yes`, base image's own
+  digest pin already fixes its version) rather than a redundant explicit
+  pin, judged sound by both reviewers.
+
+**Phase 2 tool-migration work is done.** Confirmed via `grep`:
+`delete_duplicates.dart` makes zero external-tool calls (only consumes
+already-generated reports) — correctly out of scope, no migration needed.
+`drive_detection.dart` correctly stays host-side forever — `lsblk`/
+`blkid`/`findmnt` need real host device visibility a container can't
+provide. What's left before #76 is fully done: wiring these Dart
+implementations into `pipeline_models.dart`/`media_pipeline_app.dart` (the
+actual "swap Bash for Dart in production" step), and Phase 3 (UID/GID
+mapping — now confirmed real via two independent live reproductions, not
+theoretical).
+
+**Real incident, unrelated to code correctness**: issue #76 was
+accidentally auto-closed by PR #93's merge — its body included the
+disclaimer "Does not close #76," and GitHub's issue-auto-close keyword
+matcher doesn't parse negation, so "close #76" as a bare substring
+triggered the close anyway. Caught (a reviewer subagent noticed
+`gh issue view` showed CLOSED mid-review), reopened, documented. Fixed
+going forward by avoiding the literal words close/closes/closed/fix/
+fixes/fixed/resolve/resolves/resolved anywhere near "#76"/"#77" in any
+PR body or commit message, even inside a negated disclaimer.
+
+RESUME AT: wire the four container-routed Dart modules (plus the earlier
+Phase 0b destructive-script ports) into `pipeline_models.dart`/
+`media_pipeline_app.dart` — the step where this stops being "logic proven
+correct in isolation" and starts being what actually runs against Leo's
+real drive. Astrid's standing risk list for this step: (1) the
+collision-rename behavior hitting a live case for the first time, (2)
+making sure the confirm-gate is enforced exactly before any `.run(confirm:
+true)` call, (3) re-running every parity test against the actually-wired
+path. Also still open: Phase 3 (UID/GID mapping — two live reproductions
+now on record) needs solving before any of this can run for real on a
+Linux host without root/chmod workarounds.
