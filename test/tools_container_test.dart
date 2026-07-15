@@ -278,6 +278,59 @@ void main() {
       expect(container.containerId, 'abc123containerid');
     });
 
+    test(
+      'start() passes --user <uid>:<gid> when hostUserFlag is set '
+      '(#76 Phase 3 — bind-mount ownership fix)',
+      () async {
+        List<String>? capturedArgs;
+        final container = ToolsContainer(
+          hostMountRoot: '/mnt/target_drive',
+          hostUserFlag: '1234:5678',
+          runner: (args) async {
+            capturedArgs = args;
+            return ProcessResult(0, 0, 'abc123containerid\n', '');
+          },
+        );
+
+        await container.start();
+
+        final userIndex = capturedArgs!.indexOf('--user');
+        expect(userIndex, greaterThanOrEqualTo(0));
+        expect(capturedArgs![userIndex + 1], '1234:5678');
+        // --user must still precede -v/the image/the sleep-infinity
+        // command — it's a docker-run-level flag, not a tool argument.
+        expect(userIndex, lessThan(capturedArgs!.indexOf('-v')));
+      },
+    );
+
+    test(
+      'start() omits --user entirely when hostUserFlag is null (Windows, '
+      'or UID/GID detection failed) — never passes a null/empty value',
+      () async {
+        List<String>? capturedArgs;
+        final container = ToolsContainer(
+          hostMountRoot: '/mnt/target_drive',
+          hostUserFlag: null,
+          runner: (args) async {
+            capturedArgs = args;
+            return ProcessResult(0, 0, 'abc123containerid\n', '');
+          },
+        );
+
+        await container.start();
+
+        expect(capturedArgs, isNot(contains('--user')));
+      },
+    );
+
+    test(
+      'defaults hostUserFlag to detectHostUserFlag() when not overridden',
+      () {
+        final container = ToolsContainer(hostMountRoot: '/mnt/target_drive');
+        expect(container.hostUserFlag, ToolsContainer.detectHostUserFlag());
+      },
+    );
+
     test('start() includes a session label for orphan cleanup', () async {
       List<String>? capturedArgs;
       final container = ToolsContainer(
@@ -658,6 +711,172 @@ void main() {
       );
     },
   );
+
+  group(
+    'ToolsContainer host UID/GID mapping (#76 Phase 3, requires Docker + '
+    'the media-pipeline-tools:local image)',
+    () {
+      late Directory tempDir;
+
+      setUp(() async {
+        tempDir = await Directory.systemTemp.createTemp(
+          'tools_container_uid_test_',
+        );
+      });
+
+      tearDown(() async {
+        if (await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
+      test(
+        'a file the container writes on the bind mount is owned by the '
+        'real host user, not the image\'s baked-in uid 10000 "tools" user '
+        '— proves start()\'s --user override actually takes effect, not '
+        'just that it was passed as an argument',
+        () async {
+          final container = ToolsContainer(hostMountRoot: tempDir.path);
+          await container.start();
+          try {
+            final result = await container.exec([
+              'bash',
+              '-c',
+              'echo written-by-container > /data/container_written.txt',
+            ]);
+            expect(result.exitCode, 0, reason: result.stderr as String);
+
+            final hostFile = File('${tempDir.path}/container_written.txt');
+            expect(await hostFile.exists(), isTrue);
+
+            final statResult = Process.runSync('stat', [
+              '-c',
+              '%u',
+              hostFile.path,
+            ]);
+            expect(statResult.exitCode, 0);
+            final fileUid = int.parse((statResult.stdout as String).trim());
+
+            final hostUidResult = Process.runSync('id', ['-u']);
+            final hostUid = int.parse(
+              (hostUidResult.stdout as String).trim(),
+            );
+
+            expect(
+              fileUid,
+              hostUid,
+              reason:
+                  'without the --user override, this file would be owned '
+                  'by uid 10000 (the image\'s baked-in "tools" user, see '
+                  'docker/tools/Dockerfile) instead of the real host uid '
+                  '$hostUid — the whole point of #76 Phase 3.',
+            );
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment.',
+      );
+
+      test(
+        'a pre-existing host file is readable by the container without any '
+        'chmod workaround, once --user maps the container to the host uid',
+        () async {
+          final hostFile = File('${tempDir.path}/preexisting.txt');
+          await hostFile.writeAsString('pre-existing host bytes');
+          // Deliberately no chmod here — this is the exact scenario PR
+          // #94/#95/#96 had to work around with a test-only chmod. This
+          // test's whole point is proving that workaround is no longer
+          // needed.
+
+          final container = ToolsContainer(hostMountRoot: tempDir.path);
+          await container.start();
+          try {
+            final result = await container.exec([
+              'cat',
+              '/data/preexisting.txt',
+            ]);
+            expect(result.exitCode, 0, reason: result.stderr as String);
+            expect(result.stdout, 'pre-existing host bytes');
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment.',
+      );
+
+      test(
+        'exiftool/ffmpeg/rclone/czkawka_cli/sha256sum all still run '
+        'successfully as an arbitrary host uid with no corresponding '
+        '/etc/passwd entry inside the container',
+        () async {
+          final container = ToolsContainer(hostMountRoot: tempDir.path);
+          await container.start();
+          try {
+            for (final probe in <List<String>>[
+              ['exiftool', '-ver'],
+              ['ffmpeg', '-version'],
+              ['rclone', 'version'],
+              ['czkawka_cli', '--version'],
+              ['sha256sum', '--version'],
+            ]) {
+              final result = await container.exec(probe);
+              expect(
+                result.exitCode,
+                0,
+                reason:
+                    '${probe.join(' ')} failed running as an arbitrary '
+                    'host uid: ${result.stderr}',
+              );
+            }
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment.',
+      );
+    },
+  );
+
+  group('ToolsContainer.detectHostUserFlag (pure, no Docker needed)', () {
+    test(
+      'returns null on Windows',
+      () {
+        expect(ToolsContainer.detectHostUserFlag(), isNull);
+      },
+      skip: !Platform.isWindows
+          ? 'Only meaningful when actually running on Windows.'
+          : false,
+    );
+
+    test(
+      'returns a "uid:gid" string matching real `id -u`/`id -g` output on '
+      'Linux/macOS',
+      () {
+        final flag = ToolsContainer.detectHostUserFlag();
+        expect(flag, isNotNull);
+        expect(flag, matches(RegExp(r'^\d+:\d+$')));
+
+        final expectedUid = Process.runSync('id', [
+          '-u',
+        ]).stdout.toString().trim();
+        final expectedGid = Process.runSync('id', [
+          '-g',
+        ]).stdout.toString().trim();
+        expect(flag, '$expectedUid:$expectedGid');
+      },
+      skip: !Platform.isLinux && !Platform.isMacOS,
+    );
+  });
 
   group('Docker/image availability self-check (meta-test)', () {
     test(
