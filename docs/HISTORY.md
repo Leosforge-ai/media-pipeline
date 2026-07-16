@@ -2042,3 +2042,43 @@ intermittently in this environment both with and without this branch's changes (
 
 **Risk:** Low, matching #70's own assessment — UX/framing only, no data-loss path, confirm-gate
 mechanics unaffected. Closes #70.
+
+## Phase 31 — Guided run: visible staleness warning on checkpoint resume/retry (2026-07-16)
+
+**Context:** #68, a follow-up flagged independently by Cody and Astrid during PR #67's review
+(Phase 9). The guided-run checkpoint's staleness check (`GuidedRunCheckpoint.isStale`,
+hdPath/reportDir match + within `guidedRunCheckpointMaxAge`) and the in-session
+retry-from-failed-step logic can't detect content drift that isn't a settings change: a manual
+pipeline step run outside the guided flow against the same `HD_PATH`, or `cleaning_staging`'s
+actual contents changing between an earlier step's output (e.g. `scan-duplicates`) and a later
+step (e.g. `delete-dry-run`) being retried in isolation. Risk was assessed LOW by the issue
+itself — no data-loss path, since the separate `--confirm` phrase gate is completely unaffected;
+worst case is a stale dry-run report shown to the user or a redundant re-run.
+**Decision:** Per the issue's own two possible directions, picked the cheaper one it explicitly
+flagged as possibly sufficient given the confirm-gate backstop: a visible UI warning, not a
+content-fingerprint mechanism (mtime/file-count of `cleaning_staging`, or a report hash). A
+fingerprint would add real complexity (a new persisted field, a new comparison surface, more
+edge cases to test) to close a gap whose own worst case is "misleading report", already guarded
+by the unrelated, unchanged manual confirm step — the cost didn't match the risk.
+Added `_guidedRunCheckpointResumedWarning` (bool state, set when `_loadGuidedRunCheckpoint`
+restores a non-stale persisted checkpoint, cleared once the user acts on it by starting the next
+segment) and reused the existing `_guidedSegmentCompletedCount` state (already tracks "some
+steps in this segment already succeeded and a retry would resume from the failed one") to drive
+a new `_guidedRunStalenessWarning` getter. It surfaces at both points named in the issue: (1) the
+idle state right after a persisted checkpoint is restored, before the user presses "Continue
+Guided Run"; and (2) the idle state right after a mid-segment step failure, before the user
+retries and the run resumes from the failed step instead of the segment start. `_GuidedRunPanel`
+gained an optional `warningMessage` rendered in the error color with a warning icon, additive to
+the existing status message — no existing button/label/status-message behavior changed.
+**Pivots:** None — considered making the retry-warning condition reactively track live
+`TextEditingController` edits (to hide the warning the instant a changed HD_PATH would force a
+full segment restart instead of a resume), but the existing `_guidedRunStatusMessage` code this
+sits beside already doesn't do that (no listener triggers a rebuild on controller text changes,
+by design) — matching that established pattern instead of introducing new reactive plumbing for
+one warning string.
+**Outcome:** `test/guided_run_persistence_and_retry_widget_test.dart` gained a
+`guided run staleness warning (#68)` group: one test proves the warning appears after a
+simulated app restart restores a persisted checkpoint and disappears once the user starts the
+next segment; one test proves it appears after a mid-segment step failure (before retrying) and
+disappears once the retry succeeds and the segment completes. `flutter analyze`: clean.
+`flutter test`: full suite green, 389 -> 391 tests (net +2). Closes #68.

@@ -114,6 +114,14 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
   // against a different target and can no longer be trusted, so the
   // segment restarts from its first step instead.
   PipelineSettings? _guidedSegmentAttemptSettings;
+  // Set true when `_loadGuidedRunCheckpoint` restores a persisted checkpoint
+  // (issue #68): the checkpoint's own staleness check (`isStale`) only knows
+  // "same hdPath/reportDir + within 7 days", not whether the user ran a
+  // manual step outside the guided flow or `cleaning_staging` actually
+  // changed in between. Drives a UI warning so the human gets a chance to
+  // notice before trusting a resumed run; cleared once they act on it by
+  // starting the next segment.
+  bool _guidedRunCheckpointResumedWarning = false;
   late final ImmichApiClient _immichClient;
   late final ImmichChecklistStore _checklistStore;
   late final GuidedRunCheckpointStore _guidedRunCheckpointStore;
@@ -208,6 +216,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       }
       setState(() {
         _guidedSegmentIndex = restoredIndex;
+        _guidedRunCheckpointResumedWarning = true;
       });
     } catch (_) {
       // Non-fatal: a corrupt/unreadable checkpoint file just means the
@@ -447,6 +456,43 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
     return 'Guided run segment finished. Continue when ready.';
   }
 
+  /// A visible reminder (issue #68) that neither the persisted-checkpoint
+  /// staleness check nor the in-session retry-from-failed-step logic can
+  /// actually detect content drift outside the guided flow — only that the
+  /// hdPath/reportDir settings still match and (for the checkpoint) that
+  /// it's recent. Shown whenever the *next* button press would resume
+  /// partway through a segment instead of starting it fresh, so the human
+  /// gets a chance to notice before trusting a possibly-stale report:
+  ///
+  /// - Resuming from a checkpoint persisted in an earlier app session
+  ///   (`_guidedRunCheckpointResumedWarning`).
+  /// - Retrying a segment after a step failed partway through it — the next
+  ///   attempt resumes from the failed step, skipping already-succeeded
+  ///   ones (`_guidedSegmentCompletedCount > 0`).
+  ///
+  /// Returns null while a run is in progress (its own "in progress" status
+  /// message already supersedes this) or when the next press would start a
+  /// segment cleanly from its first step.
+  String? get _guidedRunStalenessWarning {
+    if (_guidedRunning) {
+      return null;
+    }
+    if (_guidedRunCheckpointResumedWarning) {
+      return 'Resuming from a checkpoint saved in an earlier session. If you '
+          'ran a pipeline step manually outside the guided run, or files in '
+          'cleaning_staging changed, since then, treat any report from an '
+          'already-completed step as possibly stale.';
+    }
+    if (_guidedSegmentCompletedCount > 0) {
+      return 'Continuing will resume from the step that previously failed, '
+          'skipping steps already completed in this segment. If '
+          'cleaning_staging changed since those earlier steps ran, treat '
+          'any reused report (e.g. the duplicate dry-run) as possibly '
+          'stale.';
+    }
+    return null;
+  }
+
   Future<void> _runNextGuidedSegment() async {
     if (!_canRunNextGuidedSegment) {
       return;
@@ -483,6 +529,12 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
       _settings = attemptSettings;
       _guidedSegmentAttemptSettings = attemptSettings;
       _guidedRunning = true;
+      // The checkpoint-resume warning is about "before you continue,
+      // remember the checkpoint might be stale" — once the user has acted
+      // on it by starting this segment, keep showing it would just be
+      // redundant with the (also stale-risk) retry-from-failed-step warning
+      // below, if this attempt itself later fails partway through.
+      _guidedRunCheckpointResumedWarning = false;
     });
 
     // Tracked alongside `GuidedRunController.run`'s own return value so a
@@ -769,6 +821,7 @@ class _PipelineHomePageState extends State<PipelineHomePage> {
                               return _GuidedRunPanel(
                                 buttonLabel: _guidedRunButtonLabel,
                                 statusMessage: _guidedRunStatusMessage,
+                                warningMessage: _guidedRunStalenessWarning,
                                 enabled: _canRunNextGuidedSegment,
                                 running: _guidedRunning,
                                 onRun: _runNextGuidedSegment,
@@ -2199,6 +2252,7 @@ class _GuidedRunPanel extends StatelessWidget {
   const _GuidedRunPanel({
     required this.buttonLabel,
     required this.statusMessage,
+    this.warningMessage,
     required this.enabled,
     required this.running,
     required this.onRun,
@@ -2206,6 +2260,12 @@ class _GuidedRunPanel extends StatelessWidget {
 
   final String buttonLabel;
   final String statusMessage;
+  // Issue #68: a visible reminder that a resumed checkpoint or a
+  // retry-from-failed-step run can't detect content drift (manual steps run
+  // outside the guided flow, or `cleaning_staging` changing) since the
+  // relevant earlier step ran. Null means the next run starts a segment
+  // fresh, so there's nothing stale to warn about.
+  final String? warningMessage;
   final bool enabled;
   final bool running;
   final VoidCallback onRun;
@@ -2214,6 +2274,7 @@ class _GuidedRunPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final warning = warningMessage;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: DecoratedBox(
@@ -2237,6 +2298,29 @@ class _GuidedRunPanel extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(statusMessage, style: textTheme.bodySmall),
+              if (warning != null) ...[
+                const SizedBox(height: 8),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.warning_amber,
+                      size: 16,
+                      color: colorScheme.error,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        warning,
+                        key: const Key('guidedRunStalenessWarning'),
+                        style: textTheme.bodySmall?.copyWith(
+                          color: colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 8),
               FilledButton.icon(
                 onPressed: enabled ? onRun : null,

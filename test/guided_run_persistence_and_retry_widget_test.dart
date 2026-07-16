@@ -290,6 +290,127 @@ void main() {
       },
     );
   });
+
+  group('guided run staleness warning (#68)', () {
+    testWidgets(
+      'warns when resuming from a persisted checkpoint restored after a '
+      'simulated app restart',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(1600, 1200);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final store = _FakeGuidedRunCheckpointStore();
+
+        // First "session": complete the first segment so a checkpoint gets
+        // persisted.
+        await tester.pumpWidget(
+          MediaPipelineApp(
+            runner: _AlwaysSucceedsRunner(),
+            checklistStore: _FakeChecklistStore(),
+            guidedRunCheckpointStore: store,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('guidedRunStalenessWarning')),
+          findsNothing,
+          reason: 'a fresh run with no checkpoint has nothing stale to warn '
+              'about',
+        );
+
+        await tester.tap(find.text('Run Guided Pipeline'));
+        await tester.pumpAndSettle();
+
+        // Second "session": a brand-new widget tree restores the persisted
+        // checkpoint. Resuming it should surface a visible warning that the
+        // underlying data may have changed since it was recorded.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpWidget(
+          MediaPipelineApp(
+            runner: _AlwaysSucceedsRunner(),
+            checklistStore: _FakeChecklistStore(),
+            guidedRunCheckpointStore: store,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Continue Guided Run'), findsOneWidget);
+        expect(
+          find.byKey(const Key('guidedRunStalenessWarning')),
+          findsOneWidget,
+          reason: 'resuming a persisted checkpoint must warn the user the '
+              'underlying data may have drifted since it was recorded',
+        );
+
+        // Acting on it (starting the next segment) clears the warning; the
+        // segment's own status/failure messaging takes over from there.
+        await tester.tap(find.text('Continue Guided Run'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('guidedRunStalenessWarning')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'warns when retrying a single failed step in isolation, not just on '
+      'checkpoint resume',
+      (WidgetTester tester) async {
+        tester.view.physicalSize = const Size(1600, 1200);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final runner = _CountingFakeRunner(
+          failingStepIds: {'scan-duplicates'},
+        );
+
+        await tester.pumpWidget(
+          MediaPipelineApp(
+            runner: runner,
+            checklistStore: _FakeChecklistStore(),
+            guidedRunCheckpointStore: _FakeGuidedRunCheckpointStore(),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('guidedRunStalenessWarning')),
+          findsNothing,
+        );
+
+        await tester.tap(find.text('Run Guided Pipeline'));
+        await tester.pumpAndSettle();
+
+        // scan-duplicates failed after check-system/stitch-metadata already
+        // succeeded: the next press retries just the failed step, so the
+        // warning must be visible before the user commits to that retry.
+        expect(
+          find.byKey(const Key('guidedRunStalenessWarning')),
+          findsOneWidget,
+          reason: 'retrying from a failed step in isolation must warn that '
+              'cleaning_staging may have changed since the earlier, '
+              'already-succeeded steps ran',
+        );
+
+        runner.failingStepIds.clear();
+        await tester.tap(find.text('Run Guided Pipeline'));
+        await tester.pumpAndSettle();
+
+        // The retry succeeded and the segment fully completed, so there is
+        // no pending partial-segment retry left to warn about.
+        expect(
+          find.byKey(const Key('guidedRunStalenessWarning')),
+          findsNothing,
+        );
+      },
+    );
+  });
 }
 
 class _AlwaysSucceedsRunner extends PipelineRunner {
