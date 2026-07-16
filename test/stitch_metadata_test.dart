@@ -291,15 +291,45 @@ void main() {
 
   group('applyMetadataWithExiftool', () {
     test(
-      'still invokes exiftool with just -overwrite_original when the JSON '
-      'has no usable tags at all (matches the real Python script\'s literal '
-      'len(args) == 3 check, which only skips exiftool for the '
-      'exactly-one-tag case below, not the zero-tag case)',
+      'skips exiftool entirely when the JSON has no usable tags at all '
+      '(the genuine zero-tags case, fixed by issue #91: matches the '
+      'corrected Python script\'s len(args) == 2 check)',
       () async {
         final tmp = await Directory.systemTemp.createTemp('stitch_apply_');
         addTearDown(() => tmp.delete(recursive: true));
         final json = File('${tmp.path}/sidecar.json');
         await json.writeAsString(jsonEncode({}));
+        final media = File('${tmp.path}/photo.jpg');
+        await media.writeAsBytes('img'.codeUnits);
+
+        var invoked = false;
+        final ok = await applyMetadataWithExiftool(
+          media.path,
+          json.path,
+          runner: (args) async {
+            invoked = true;
+            return (0, '', '');
+          },
+          warn: (_) async {},
+        );
+
+        expect(ok, isFalse);
+        expect(
+          invoked,
+          isFalse,
+          reason: 'no tags queued means exiftool should never be invoked',
+        );
+      },
+    );
+
+    test(
+      'a title-only sidecar now results in exiftool being invoked with '
+      'the -Title= tag, not silently skipped (regression test for #91)',
+      () async {
+        final tmp = await Directory.systemTemp.createTemp('stitch_apply_');
+        addTearDown(() => tmp.delete(recursive: true));
+        final json = File('${tmp.path}/sidecar.json');
+        await json.writeAsString(jsonEncode({'title': 'Only a title'}));
         final media = File('${tmp.path}/photo.jpg');
         await media.writeAsBytes('img'.codeUnits);
 
@@ -315,40 +345,45 @@ void main() {
         );
 
         expect(ok, isTrue);
-        expect(capturedArgs, ['-overwrite_original', media.path]);
+        expect(capturedArgs, [
+          '-overwrite_original',
+          '-Title=Only a title',
+          media.path,
+        ]);
       },
     );
 
     test(
-      'preserves the exact len(args)==3 quirk: a title-only sidecar is '
-      'treated as having no useful tags and exiftool is never invoked',
+      'a description-only sidecar now results in exiftool being invoked '
+      'with the -Description= tag, not silently skipped (regression test '
+      'for #91)',
       () async {
         final tmp = await Directory.systemTemp.createTemp('stitch_apply_');
         addTearDown(() => tmp.delete(recursive: true));
         final json = File('${tmp.path}/sidecar.json');
-        await json.writeAsString(jsonEncode({'title': 'Only a title'}));
+        await json.writeAsString(
+          jsonEncode({'description': 'Only a description'}),
+        );
         final media = File('${tmp.path}/photo.jpg');
         await media.writeAsBytes('img'.codeUnits);
 
-        var invoked = false;
+        List<String>? capturedArgs;
         final ok = await applyMetadataWithExiftool(
           media.path,
           json.path,
           runner: (args) async {
-            invoked = true;
+            capturedArgs = args;
             return (0, '', '');
           },
           warn: (_) async {},
         );
 
-        expect(
-          ok,
-          isFalse,
-          reason:
-              'This mirrors a preserved quirk in the real Python script — '
-              'see stitch_metadata.dart\'s module doc comment.',
-        );
-        expect(invoked, isFalse);
+        expect(ok, isTrue);
+        expect(capturedArgs, [
+          '-overwrite_original',
+          '-Description=Only a description',
+          media.path,
+        ]);
       },
     );
 
