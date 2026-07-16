@@ -104,9 +104,10 @@ class PipelineStep {
   /// The subprocess this step runs, via `Process.start` — see
   /// `PipelineRunner.run`. Mutually exclusive with [dartAction]: a step has
   /// exactly one execution mechanism, enforced by this class's constructor
-  /// assert. Every step in [buildPipelineSteps] currently uses this field;
-  /// no step uses [dartAction] yet (see issue #76's roadmap — this is
-  /// plumbing-only, real step migrations are later PRs).
+  /// assert. See issue #76's roadmap: `check-system`, `setup-dependencies`,
+  /// `configure-rclone`, `sync-immich`, `setup-immich`, `verify-cleanup`,
+  /// and `verify-immich` still use this field; every other step in
+  /// [buildPipelineSteps] uses [dartAction] instead.
   final PipelineCommand? command;
 
   /// A Dart-native, in-process alternative to [command] — see

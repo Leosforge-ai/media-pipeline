@@ -120,9 +120,9 @@ When opening a bug report, include:
 
 Do not include private media, private archive names, OAuth credentials, API keys, `.env` files, rclone configs, or full logs containing personal file paths.
 
-## CodeRabbit reviews
+## Automated PR review
 
-This repo includes CodeRabbit configuration. CodeRabbit feedback is welcome, but safety-sensitive changes still need human review. In particular, deletion, parsing, metadata writing, Docker volume mounts, and permission changes should be reviewed manually even if automated checks pass.
+Every PR gets an automated safety-focused review (see [`docs/CI.md`](docs/CI.md)). Its feedback is welcome, but safety-sensitive changes still need human review. In particular, deletion, parsing, metadata writing, Docker volume mounts, and permission changes should be reviewed manually even if automated checks pass.
 
 ## License
 
