@@ -243,27 +243,51 @@ void main() {
   );
 
   test(
-    'DISCOVERY: the real, unmodified 11_restore_from_trash.sh --confirm '
-    'aborts the whole restore batch on its first destination collision '
-    '(coreutils 9.x `mv -n` exits 1 on skip, and the script runs under '
-    '`set -e`) — the Dart restore-confirm dartAction does not inherit this '
-    'bug; it skips the one colliding file and finishes restoring every '
-    'other file',
+    'restore-confirm collision case: the real, fixed 11_restore_from_trash.sh '
+    '--confirm and the Dart restore-confirm dartAction now agree — neither '
+    'aborts the batch on a destination collision, and both skip the same '
+    'one file while restoring every other file',
     () async {
+      // Historical note: before issue #102 / this fix, the real Bash script
+      // hard-aborted the whole batch on its first collision here (coreutils
+      // 9.x's `mv -n` exits 1 on a no-clobber skip, and the script ran under
+      // `set -e`) while the Dart dartAction correctly skipped-and-continued
+      // — a real, pre-existing divergence, not introduced by the dartAction
+      // wiring. This test now proves the fixed Bash script and the Dart
+      // action produce IDENTICAL outcomes on the exact same collision
+      // fixture, closing that gap rather than just documenting it.
       final repoRoot = _findRepoRoot();
+      final dartRoot = await Directory.systemTemp.createTemp(
+        'restore_mirror_dart_collision_',
+      );
       final bashRoot = await Directory.systemTemp.createTemp(
-        'restore_mirror_bash_abort_',
+        'restore_mirror_bash_collision_',
       );
       addTearDown(() async {
-        if (await bashRoot.exists()) {
-          await bashRoot.delete(recursive: true);
+        for (final dir in [dartRoot, bashRoot]) {
+          if (await dir.exists()) {
+            await dir.delete(recursive: true);
+          }
         }
       });
+      await _seedRestoreFixture(dartRoot, includeCollision: true);
       await _seedRestoreFixture(bashRoot, includeCollision: true);
 
-      // Confirms the discovery empirically against the real, untouched
-      // script — this is not a hypothetical or a misreading of `mv --help`;
-      // it is what actually happens on this environment's coreutils.
+      final steps = buildPipelineSteps();
+      final confirmStep = steps.singleWhere(
+        (step) => step.id == 'restore-confirm',
+      );
+      final dartSettings = PipelineSettings(
+        hdPath: dartRoot.path,
+        reportDir: '${dartRoot.path}/reports',
+      );
+      final runner = PipelineRunner(workingDirectory: repoRoot.path);
+
+      final dartConfirm = await runner.run(confirmStep, dartSettings);
+      expect(dartConfirm.succeeded, isTrue);
+      expect(dartConfirm.output, contains('Skipped (destination already'));
+      expect(dartConfirm.output, contains('Restored:'));
+
       final bashResult = await Process.run(
         'bash',
         ['${repoRoot.path}/scripts/11_restore_from_trash.sh', '--confirm'],
@@ -277,64 +301,44 @@ void main() {
       );
       expect(
         bashResult.exitCode,
-        isNot(0),
+        0,
         reason:
-            'Documents the discovery: `mv -n` on an existing destination '
-            'exits 1 on this coreutils version, and `set -euo pipefail` '
-            'turns that into a hard script failure — a real, pre-existing '
-            'production risk in the still-live Bash script, unrelated to '
-            'and not introduced by this PR (restore_from_trash.dart itself '
-            'predates this PR; only its dartAction wiring is new here).',
+            'Post-#102 fix: a collision is now a benign, logged skip — the '
+            'script completes the whole batch instead of hard-aborting. '
+            'stderr: ${bashResult.stderr}',
       );
 
-      final dartRoot = await Directory.systemTemp.createTemp(
-        'restore_mirror_dart_continues_',
-      );
-      addTearDown(() async {
-        if (await dartRoot.exists()) {
-          await dartRoot.delete(recursive: true);
-        }
-      });
-      await _seedRestoreFixture(dartRoot, includeCollision: true);
-
-      final steps = buildPipelineSteps();
-      final confirmStep = steps.singleWhere(
-        (step) => step.id == 'restore-confirm',
-      );
-      final dartSettings = PipelineSettings(
-        hdPath: dartRoot.path,
-        reportDir: '${dartRoot.path}/reports',
-      );
-      final runner = PipelineRunner(workingDirectory: repoRoot.path);
-
-      final dartConfirm = await runner.run(confirmStep, dartSettings);
-
-      // Unlike the Bash script, the dartAction never aborts on a skip: it
-      // reports the collision truthfully and keeps going.
-      expect(dartConfirm.succeeded, isTrue);
-      expect(dartConfirm.output, contains('Skipped (destination already'));
-      expect(dartConfirm.output, contains('Restored:'));
-
+      // --- Cross-check: both sides leave only the colliding file in
+      // media_trash — everything else was restored, on both sides.
       final dartTrash = await _snapshotFiles(
         Directory('${dartRoot.path}/media_trash'),
         dartRoot.path,
       );
-      // Only the colliding file remains — everything else was restored,
-      // even though it comes alphabetically after the collision.
+      final bashTrash = await _snapshotFiles(
+        Directory('${bashRoot.path}/media_trash'),
+        bashRoot.path,
+      );
       expect(dartTrash.keys, hasLength(1));
       expect(dartTrash.keys.single, contains('collides.jpg'));
+      expect(bashTrash.keys, hasLength(1));
+      expect(bashTrash.keys.single, contains('collides.jpg'));
 
+      // --- Cross-check: the non-colliding file was restored on both sides,
+      // identically, despite the earlier collision — no batch-wide abort on
+      // either side anymore.
       final dartRestored = await _snapshotFiles(
         Directory('${dartRoot.path}/cleaning_staging'),
         dartRoot.path,
       );
-      expect(
-        dartRestored.keys.where((k) => k.contains('restorable.jpg')),
-        hasLength(1),
-        reason:
-            'The non-colliding file was restored despite the earlier '
-            'collision — no batch-wide abort.',
+      final bashRestored = await _snapshotFiles(
+        Directory('${bashRoot.path}/cleaning_staging'),
+        bashRoot.path,
       );
+      expect(dartRestored.keys.toSet(), bashRestored.keys.toSet());
+      final restorableKey = dartRestored.keys.singleWhere(
+        (k) => k.contains('restorable.jpg'),
+      );
+      expect(dartRestored[restorableKey], bashRestored[restorableKey]);
     },
     skip: !Platform.isLinux && !Platform.isMacOS,
   );
