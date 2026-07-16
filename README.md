@@ -1,5 +1,9 @@
 # Google Photos + Google Drive Media Cleanup Pipeline with Immich
 
+[![CI](https://github.com/Leosforge-ai/media-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Leosforge-ai/media-pipeline/actions/workflows/ci.yml)
+[![gitleaks](https://github.com/Leosforge-ai/media-pipeline/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/Leosforge-ai/media-pipeline/actions/workflows/gitleaks.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A defensive, resumable media workflow for people who want to consolidate Google Photos Takeout exports and Google Drive media, repair Google Photos JSON metadata, detect duplicates, safely move duplicates aside, and browse the final library in Immich.
 
 Built from real-world failure cases: `.tgz` Takeout archives, broken MP4 files, duplicated Google Photos folders such as `2024/` and `Fotos de 2024/`, Czkawka CLI flag changes, missing FFmpeg, unsafe duplicate-report parsing, and Immich external-library path mistakes.
