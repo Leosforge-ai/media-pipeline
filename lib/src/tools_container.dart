@@ -110,6 +110,34 @@ const Object _hostUserFlagNotProvided = Object();
 /// only `whoami`/username-lookup style operations fail in that situation
 /// (`cannot find name for user ID <uid>`), and none of these tools rely on
 /// one.
+///
+/// ## `$HOME` for the arbitrary host UID (issue #105)
+///
+/// An arbitrary host uid with no `/etc/passwd` entry inside the container
+/// also has no `$HOME` the shell can resolve, so any tool that writes a
+/// cache/config/state file under `$HOME` fails there. PR #104 first hit
+/// this with `czkawka_cli` (its scan cache DB write panics — Rust exit
+/// `101` — with `$HOME` unset/unwritable) and worked around it with a
+/// per-invocation `env HOME=...` in `lib/src/duplicate_scan.dart`. Per
+/// issue #105, that fix now lives here instead: whenever [hostUserFlag] is
+/// non-null (i.e. whenever `--user` is overriding the image's baked-in
+/// `tools` user), [start] also passes `-e HOME=/tmp` to `docker run`, so
+/// every `docker exec` into the container inherits a working `$HOME`
+/// without any consumer having to know or repeat this. `/tmp` is used
+/// (not a bind-mount-internal directory) because it's the simplest thing
+/// that's generically writable by *any* uid: `docker/tools/Dockerfile` is
+/// `debian:bookworm-slim`-based and never touches `/tmp`'s permissions, so
+/// it keeps Debian's default `drwxrwxrwt` (mode `1777`, world-writable
+/// with the sticky bit set) — any uid, including one with no
+/// `/etc/passwd` entry, can create files there, and the sticky bit means
+/// it can only delete/rename its own. `/tmp` is also container-local
+/// scratch space (not the bind-mounted [containerMountPath]), so nothing
+/// written there leaks onto the host or needs cleanup beyond the
+/// container's own lifecycle. Left untouched (no `-e HOME=...` passed) when
+/// [hostUserFlag] is `null` (Windows, or detection failed): the image's
+/// baked-in `tools` user already has a real, writable `$HOME`
+/// (`/home/tools`, from `useradd --create-home` in
+/// `docker/tools/Dockerfile`), so there is nothing to fix in that case.
 class ToolsContainer {
   ToolsContainer({
     required this.hostMountRoot,
@@ -247,7 +275,18 @@ class ToolsContainer {
       // the image's default user) when [hostUserFlag] is `null` (Windows,
       // or UID/GID detection failed) — never passed as an empty/malformed
       // value.
-      if (hostUserFlag != null) ...['--user', hostUserFlag!],
+      if (hostUserFlag != null) ...[
+        '--user',
+        hostUserFlag!,
+        // See this file's top-level "$HOME for the arbitrary host UID"
+        // doc section (issue #105): the overridden uid has no
+        // `/etc/passwd` entry and therefore no resolvable `$HOME`; `/tmp`
+        // is world-writable (sticky bit, mode 1777) by default in this
+        // image's `debian:bookworm-slim` base, so it works for any uid
+        // without needing a bind-mount-internal directory.
+        '-e',
+        'HOME=/tmp',
+      ],
       '-v',
       '$hostMountRoot:$containerMountPath',
       image,
