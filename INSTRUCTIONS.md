@@ -520,40 +520,6 @@ mv /mnt/target_drive/media_trash /mnt/target_drive/media_trash_REVIEW_BEFORE_DEL
 
 Then delete later only after you are certain.
 
+## CI and code review
 
-## Public repository, CodeRabbit, and CI/CD
-
-This repo includes a public-repository readiness checklist, CodeRabbit configuration, and GitHub Actions CI/CD workflows.
-
-Read these files before publishing:
-
-```text
-docs/PUBLIC_RELEASE_CHECKLIST.md
-docs/CODERABBIT_AND_CI.md
-SECURITY.md
-```
-
-Run this safety check before making the repo public:
-
-```bash
-git status --short
-git ls-files | grep -Ei '(\.env$|rclone|token|secret|takeout|\.zip$|\.tgz$|raw_|cleaning_staging|immich_library|media_trash|\.log$)' || true
-```
-
-Expected result: no real secrets, logs, media archives, generated media folders, or personal configuration files are tracked by Git.
-
-If the repository does not exist yet on GitHub, create it as public with:
-
-```bash
-gh auth login
-gh repo create lharaujo/media-pipeline --public --source=. --remote=origin --push
-```
-
-If it already exists, push and switch visibility:
-
-```bash
-git push -u origin main
-gh repo edit lharaujo/media-pipeline --visibility public
-```
-
-Install CodeRabbit from its GitHub integration UI after the repository exists. The `.coderabbit.yaml` file is already included, but the GitHub App must still be authorized for the repository.
+See [`docs/CI.md`](docs/CI.md) for CI checks and automated PR review, and [`SECURITY.md`](SECURITY.md) for reporting vulnerabilities.

@@ -1,14 +1,16 @@
 # media-pipeline-tools (Docker image)
 
-Phase 1 of the cross-platform roadmap in [#76](https://github.com/Leosforge-ai/media-pipeline/issues/76)
-(Design A — Docker-containerized tool runtime). This image bundles the four external CLI
-tools the pipeline scripts already shell out to — `exiftool`, `ffmpeg`/`ffprobe`, `rclone`,
-`czkawka_cli` — at pinned, verified versions, multi-arch (`linux/amd64` + `linux/arm64`, the
-latter for Apple Silicon Macs).
+Part of the cross-platform roadmap in [#76](https://github.com/Leosforge-ai/media-pipeline/issues/76)
+(Design A — Docker-containerized tool runtime). This image bundles the CLI tools the pipeline
+needs — `exiftool`, `ffmpeg`/`ffprobe`, `rclone`, `czkawka_cli` — at pinned, verified versions,
+multi-arch (`linux/amd64` + `linux/arm64`, the latter for Apple Silicon Macs).
 
-**This image is not wired into the pipeline yet.** No `scripts/*.sh` file calls it. That's
-Phase 2 of #76, a separate future PR. This phase only proves the container exists, builds
-for both architectures, and the tools actually run inside it.
+**This image is wired into the desktop app.** The `dartAction`-backed pipeline steps
+(duplicate scan, metadata stitch, duplicate-trash confirm, restore-from-trash confirm,
+Immich Takeout duplicate dry-run) run through it via `lib/src/tools_container.dart`, one
+container session per step. The original `scripts/*.sh`/`.py` files still call the native
+host binaries directly and remain the documented fallback path — see issue #76's Phase 7
+for when they retire.
 
 ## What's in it
 
@@ -60,7 +62,7 @@ install line at all. This was flagged as an undocumented gap in Astrid's review 
 **Verified version, at the `FROM` line's currently-pinned digest**
 (`debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818`):
 
-```
+```console
 $ docker run --rm media-pipeline-tools:local bash -c "sha256sum --version | head -1; dpkg -s coreutils | grep Version"
 sha256sum (GNU coreutils) 9.1
 Version: 9.1-1

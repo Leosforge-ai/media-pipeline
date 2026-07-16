@@ -1,17 +1,38 @@
 # Desktop App
 
-The desktop app is a Flutter controller for the existing media pipeline scripts. It does not replace the safety model in the scripts: dry-runs stay visible, confirm actions stay explicit, and duplicate cleanup still moves files into `media_trash`.
+The desktop app is a Flutter controller for the media cleanup pipeline. It keeps the same
+safety model as the original scripts: dry-runs stay visible, confirm actions stay explicit,
+and duplicate cleanup still moves files into `media_trash`, never deletes.
+
+## Execution model
+
+Every pipeline step is either:
+
+- **Container-routed (`dartAction`)** — the step's logic is native Dart, and any external
+  tool it needs (`exiftool`, `ffmpeg`, `rclone`, `czkawka_cli`) runs inside the pinned
+  `media-pipeline-tools` Docker image (see [`docker/tools/README.md`](../docker/tools/README.md)),
+  one container session per step. This covers the duplicate scan, metadata stitch, both
+  trash-confirm steps (duplicate delete, restore-from-trash), and the Immich Takeout
+  duplicate dry-run. No native tool install is required for these on any platform.
+- **Native subprocess (`command`)** — the step still shells out to the original
+  `scripts/*.sh`/`.py` file on the host (system check, dependency install, rclone config,
+  Immich setup/verify, sync-to-library, cleanup verify). These are Linux-only or genuinely
+  need host-level access (`sudo`, interactive prompts, real device visibility) that a
+  container can't provide.
+
+Only Docker is required to build and run the container-routed steps — see the desktop app's
+own `requiredTools` checks per step in the UI.
 
 ## Platform Support
 
-| Platform | v1 support |
+| Platform | Status |
 | --- | --- |
-| Linux | Full app workflow when the required command-line tools are installed. |
+| Linux | Full support, both container-routed and native steps. |
 | ChromeOS | Supported through the ChromeOS Linux development environment. |
-| macOS | App can run and show workflow/configuration, but Linux-only dependency and Immich setup steps are guarded. |
-| Windows | App can run and show workflow/configuration, but Linux-only dependency and Immich setup steps are guarded. |
+| macOS | App builds and runs; container-routed steps are architecturally cross-platform (Docker Desktop) but not yet verified end-to-end on real hardware. Native/Linux-only steps stay guarded. |
+| Windows | Same as macOS. Additionally, the UID/GID host-file-ownership fix (`ToolsContainer`'s `--user` override) is Linux/macOS-only — Windows falls back to the container image's default user, so file ownership on the host may not match your account. Tracked in [#76](https://github.com/Leosforge-ai/media-pipeline/issues/76) Phase 5. |
 
-The underlying media workflow still depends on tools such as Python, Bash, ExifTool, FFmpeg, rclone, Czkawka CLI, Docker, and Docker Compose. The app surfaces those checks instead of silently installing or running risky operations on unsupported platforms.
+See [#76](https://github.com/Leosforge-ai/media-pipeline/issues/76) for the full cross-platform roadmap and current status.
 
 ## Run Locally
 
@@ -47,11 +68,11 @@ any confirmation gate.
    the log output.
 6. Open the **duplicate thumbnail review** (see below) — it must be
    acknowledged before the confirm step unlocks.
-7. Run **Move Duplicates To Trash** (`06_delete_duplicates.sh --confirm`)
-   from the app when you're ready. This is a real, working confirm button in
-   the app UI, not CLI-only — it stays locked until both the dry-run has
-   succeeded in the current app session and the thumbnail review has been
-   acknowledged for that dry-run's output.
+7. Run **Move Duplicates To Trash** from the app when you're ready. This is
+   a real, working confirm button in the app UI, not CLI-only — it stays
+   locked until both the dry-run has succeeded in the current app session
+   and the thumbnail review has been acknowledged for that dry-run's
+   output.
 
 ### Guided Run
 
@@ -85,13 +106,16 @@ and Guided Run), the app shows a **Review Duplicate Move Plan** dialog: a
 side-by-side thumbnail comparison of every proposed keep/trash pair from the
 dry-run output, instead of asking you to trust raw Czkawka report text.
 
-- It reads back only the exact `Keep: ...` / `Would trash: ...` lines that
-  `06_delete_duplicates.sh` itself already prints during a dry-run — never
-  the raw Czkawka report files, and never re-deriving which file would be
-  kept.
-- Large duplicate sets are sampled to at most 20 pairs (a fixed, reproducible
-  sample). The dialog always shows an honest count, e.g. "Showing 20 of 137
-  pairs — full list in the dry-run report," so nothing is silently hidden.
+- It reads back only the exact `Keep: ...` / `Would trash: ...` lines the
+  dry-run itself already produces — never the raw Czkawka report files, and
+  never re-deriving which file would be kept.
+- Large duplicate sets are sampled to at most 20 pairs per batch (a fixed,
+  reproducible sample), with a **Review Another Sample** button to draw
+  more. A coverage banner always shows an honest running total, e.g. "You
+  reviewed 40 of 5,412 pairs (1%)" — for very large sets (200+ pairs, under
+  10% reviewed) an extra warning explains that the percentage is still a
+  small fraction and suggests reviewing more or spot-checking folders,
+  rather than letting a rising percentage feel more conclusive than it is.
 - Still images render inline; videos and unsupported formats show a file
   icon and filename instead.
 - Opening the review marks it acknowledged for the dry-run output that
@@ -120,7 +144,7 @@ cleanup confirm action still stays separate from the dry-run action. The design
 note for the typed confirm UI lives in
 [`docs/IMMICH_DUPLICATE_CONFIRM_MODE.md`](IMMICH_DUPLICATE_CONFIRM_MODE.md).
 
-The full source-backed help library is maintained in [`docs/IMMICH_HELP_LIBRARY.md`](IMMICH_HELP_LIBRARY.md). The major implementation plan for mobile backup guidance, memories, notifications, and a future personal ranking model is maintained in [`docs/MEMORIES_AND_MOBILE_PLAN.md`](MEMORIES_AND_MOBILE_PLAN.md).
+The full source-backed help library is maintained in [`docs/IMMICH_HELP_LIBRARY.md`](IMMICH_HELP_LIBRARY.md). A custom memory-curator/ranking-feedback feature was designed and partially built ([`docs/MEMORIES_AND_MOBILE_PLAN.md`](MEMORIES_AND_MOBILE_PLAN.md)) but is currently on hold in favor of Immich's own native Machine Learning (facial recognition, Smart Search) and Memories features — see [#111](https://github.com/Leosforge-ai/media-pipeline/issues/111).
 
 ## Immich Connection
 
@@ -161,8 +185,8 @@ The app keeps the phone backup checklist in a local JSON file only. It does not 
 
 ## Safety Notes
 
-- The app never adds `--confirm` to dry-run commands.
-- Confirm steps are separate step definitions and are locked until their paired dry-run succeeds.
-- The scripts remain the source of truth for media movement, metadata writes, Immich setup, and recovery behavior.
+- The app never adds `--confirm` to dry-run commands, and never constructs a confirm action implicitly.
+- Confirm steps are separate step definitions and are locked until their paired dry-run succeeds — this gate is enforced identically regardless of whether a step runs as a container-routed `dartAction` or a native `command`.
+- For container-routed steps (see [Execution model](#execution-model) above), the Dart code is the actual, live implementation of media movement, metadata writes, and duplicate cleanup — not a wrapper around the Bash/Python scripts. The original scripts remain a fully maintained fallback for those specific steps, and the sole implementation for everything not yet container-routed (Immich setup, sync, verification, rclone config).
 - Keep using a disposable test media folder when validating code changes.
 - The Immich connection panel performs read-only HTTP GET checks only.
