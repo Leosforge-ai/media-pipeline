@@ -250,6 +250,87 @@ class ShellScriptSafetyTests(unittest.TestCase):
             self.assertEqual(duplicate.read_bytes(), b"same-photo")
 
 
+class RestoreFromTrashCollisionTests(unittest.TestCase):
+    # Regression tests for issue #102: 11_restore_from_trash.sh --confirm
+    # runs its per-file loop under `set -euo pipefail` and moves each file
+    # with `mv -n` (no-clobber). On modern coreutils, `mv -n` exits 1 (not
+    # 0) when it skips an existing destination. Combined with `set -e`,
+    # the very first collision used to kill the whole script immediately,
+    # silently leaving every later file in the batch un-restored. Same
+    # class of bug as issue #81's czkawka_cli exit-code handling
+    # (see CleanupScanExitCodeTests above).
+    def test_mid_batch_collision_does_not_abort_restoring_the_rest_of_the_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports"
+
+            # Three trashed files: "a" and "c" have a clear destination,
+            # "b" collides with a file that already exists at its
+            # original path. Alphabetical find/read order means "b" is
+            # restored in the middle of the batch, not last.
+            before = root / "cleaning_staging" / "a_before.jpg"
+            colliding = root / "cleaning_staging" / "b_collides.jpg"
+            after = root / "cleaning_staging" / "c_after.jpg"
+
+            trashed_before = root / "media_trash" / str(before).lstrip("/")
+            trashed_colliding = root / "media_trash" / str(colliding).lstrip("/")
+            trashed_after = root / "media_trash" / str(after).lstrip("/")
+            for trashed in (trashed_before, trashed_colliding, trashed_after):
+                trashed.parent.mkdir(parents=True, exist_ok=True)
+                trashed.write_text("trashed-copy", encoding="utf-8")
+
+            # Something already occupies "colliding"'s original path --
+            # this is the collision `mv -n` will skip.
+            colliding.parent.mkdir(parents=True, exist_ok=True)
+            colliding.write_text("pre-existing-file", encoding="utf-8")
+
+            result = run_script("11_restore_from_trash.sh", root, reports, "--confirm")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # Files before AND after the collision were both restored --
+            # the batch did not stop at the first collision.
+            self.assertTrue(before.exists())
+            self.assertTrue(after.exists())
+            self.assertFalse(trashed_before.exists())
+            self.assertFalse(trashed_after.exists())
+            # The collision itself was skipped, not overwritten, and the
+            # trashed copy is left in place (not silently lost).
+            self.assertEqual(colliding.read_text(encoding="utf-8"), "pre-existing-file")
+            self.assertTrue(trashed_colliding.exists())
+            self.assertIn(f"Skipped (destination already exists): {colliding}", result.stdout)
+
+    def test_genuine_mv_failure_still_aborts_and_reports_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "reports"
+
+            target = root / "cleaning_staging" / "restored.jpg"
+            trashed = root / "media_trash" / str(target).lstrip("/")
+            trashed.parent.mkdir(parents=True)
+            trashed.write_text("photo", encoding="utf-8")
+
+            # Make the destination directory unwritable so `mv` fails for
+            # a real reason (permission denied) rather than a collision --
+            # the destination file itself does not exist beforehand. Pre-
+            # create the directory so the script's own `mkdir -p` (a no-op
+            # on an existing dir) doesn't fail first for the same reason.
+            target.parent.mkdir(parents=True)
+            target.parent.chmod(0o555)
+            try:
+                result = run_script(
+                    "11_restore_from_trash.sh", root, reports, "--confirm"
+                )
+            finally:
+                # Restore write permission before the tempdir is cleaned
+                # up (its own directory removal needs it too).
+                target.parent.chmod(0o755)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ERROR: failed to restore", result.stderr)
+            self.assertFalse(target.exists())
+            self.assertTrue(trashed.exists())
+
+
 def write_fake_czkawka_tools(root: Path) -> Path:
     """Fake czkawka_cli plus ffmpeg/ffprobe/convert stand-ins, for
     environments without the real Czkawka/FFmpeg/ImageMagick binaries
