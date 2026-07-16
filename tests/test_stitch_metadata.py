@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -71,6 +73,62 @@ class StitchMetadataTests(unittest.TestCase):
                 module.safe_extract_zip(archive, dest)
 
             self.assertFalse((root.parent / "evil.jpg").exists())
+
+    def test_apply_metadata_writes_title_only_tag_instead_of_skipping(self):
+        # Regression test for #91: a sidecar with only a title (no date, no
+        # GPS, no description) must still result in exiftool being invoked
+        # with the -Title= flag, not silently discarded as "no useful tags".
+        with tempfile.TemporaryDirectory() as tmp:
+            module = load_stitch_module(Path(tmp))
+            media = Path(tmp) / "photo.jpg"
+            media.write_bytes(b"img")
+            json_path = Path(tmp) / "photo.jpg.json"
+            json_path.write_text(json.dumps({"title": "Only a title"}), encoding="utf-8")
+
+            with patch.object(module.subprocess, "run") as mock_run:
+                mock_run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+                ok = module.apply_metadata_with_exiftool(media, json_path)
+
+            self.assertTrue(ok)
+            mock_run.assert_called_once()
+            called_args = mock_run.call_args[0][0]
+            self.assertIn("-Title=Only a title", called_args)
+            self.assertEqual(called_args[-1], str(media))
+
+    def test_apply_metadata_writes_description_only_tag_instead_of_skipping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = load_stitch_module(Path(tmp))
+            media = Path(tmp) / "photo.jpg"
+            media.write_bytes(b"img")
+            json_path = Path(tmp) / "photo.jpg.json"
+            json_path.write_text(
+                json.dumps({"description": "Only a description"}), encoding="utf-8"
+            )
+
+            with patch.object(module.subprocess, "run") as mock_run:
+                mock_run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+                ok = module.apply_metadata_with_exiftool(media, json_path)
+
+            self.assertTrue(ok)
+            mock_run.assert_called_once()
+            called_args = mock_run.call_args[0][0]
+            self.assertIn("-Description=Only a description", called_args)
+
+    def test_apply_metadata_skips_exiftool_when_truly_zero_tags_queued(self):
+        # The genuine "nothing to do" case (no title, description, date, or
+        # GPS at all) must skip calling exiftool entirely.
+        with tempfile.TemporaryDirectory() as tmp:
+            module = load_stitch_module(Path(tmp))
+            media = Path(tmp) / "photo.jpg"
+            media.write_bytes(b"img")
+            json_path = Path(tmp) / "photo.jpg.json"
+            json_path.write_text(json.dumps({}), encoding="utf-8")
+
+            with patch.object(module.subprocess, "run") as mock_run:
+                ok = module.apply_metadata_with_exiftool(media, json_path)
+
+            self.assertFalse(ok)
+            mock_run.assert_not_called()
 
     def test_move_to_staging_renames_colliding_media(self):
         with tempfile.TemporaryDirectory() as tmp:

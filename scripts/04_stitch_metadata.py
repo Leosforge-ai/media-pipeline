@@ -155,7 +155,7 @@ def apply_metadata_with_exiftool(media: Path, json_path: Path) -> bool:
         args.extend(["-GPSLatitudeRef=N" if lat >= 0 else "-GPSLatitudeRef=S"])
         args.extend(["-GPSLongitudeRef=E" if lon >= 0 else "-GPSLongitudeRef=W"])
 
-    if len(args) == 3:  # only exiftool -overwrite_original and no useful tags
+    if len(args) == 2:  # only exiftool -overwrite_original and no useful tags
         return False
 
     args.append(str(media))
