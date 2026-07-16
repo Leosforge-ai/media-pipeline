@@ -2729,6 +2729,35 @@ class _DedupReviewPanel extends StatelessWidget {
                   ),
                 ),
               ),
+              if (duplicateReviewIsSmallFractionOfLargeSet(
+                reviewedCount,
+                pairCount,
+              )) ...[
+                const SizedBox(height: 6),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 14,
+                      color: colorScheme.error,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'This is a large duplicate set ($pairCount pairs) — '
+                        '$reviewedCount reviewed is still a small fraction '
+                        'even at $coveragePercent%. Consider reviewing '
+                        'several more samples, or spot-checking specific '
+                        'folders, before trusting the full move plan.',
+                        style: textTheme.bodySmall?.copyWith(
+                          color: colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
             const SizedBox(height: 8),
             Text(message, style: textTheme.bodySmall),

@@ -179,6 +179,35 @@ int duplicateReviewCoveragePercent(int reviewedCount, int totalPairs) {
   return (reviewedCount * 100) ~/ totalPairs;
 }
 
+/// Duplicate sets at or above this size are "large" for coverage-framing
+/// purposes (#70) — real-world runs have seen 5,000+ pairs, where a handful
+/// of ~20-pair "Review Another Sample" batches barely moves the percentage
+/// even though the human has looked at a perfectly normal number of pairs.
+const int duplicateReviewLargeSetThreshold = 200;
+
+/// Coverage percentages at or below this are "still a small fraction" once
+/// the set is large enough to count as [duplicateReviewLargeSetThreshold]
+/// (#70).
+const int duplicateReviewSmallFractionPercent = 10;
+
+/// True when [totalPairs] is large enough, and [reviewedCount]'s coverage
+/// of it small enough, that a bare percentage risks reading as more
+/// reassuring than it should. This is the opposite failure mode from #53's
+/// original "vague count" problem: apparent precision on a genuinely huge
+/// set can itself create false confidence (#70). Callers should pair a
+/// `true` result with an explicit reminder that the raw counts, not just
+/// the percentage, matter here.
+bool duplicateReviewIsSmallFractionOfLargeSet(
+  int reviewedCount,
+  int totalPairs,
+) {
+  if (totalPairs < duplicateReviewLargeSetThreshold) {
+    return false;
+  }
+  return duplicateReviewCoveragePercent(reviewedCount, totalPairs) <=
+      duplicateReviewSmallFractionPercent;
+}
+
 /// Samples at most [maxPairs] pairs from [pairs] for display.
 ///
 /// Uses a fixed [seed] so the same input list always produces the same

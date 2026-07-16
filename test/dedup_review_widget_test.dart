@@ -292,6 +292,80 @@ void main() {
   );
 
   testWidgets(
+    'issue #70: a large duplicate set (250 pairs) shows an extra '
+    "small-fraction warning when only one 20-pair sample batch has been "
+    'reviewed, and the warning clears once coverage climbs past the '
+    'threshold',
+    (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      // 250 pairs is well over the #70 "large set" threshold (200), and a
+      // single 20-pair batch is only 8% — this mirrors the real-world
+      // 5,000+ pair runs from the issue where a couple of sample batches
+      // barely move the percentage.
+      final buffer = StringBuffer();
+      for (var i = 0; i < 250; i++) {
+        buffer
+          ..writeln('Keep: /tmp/media-pipeline-test/keep$i.jpg')
+          ..writeln('Would trash: /tmp/media-pipeline-test/trash$i.jpg')
+          ..writeln();
+      }
+
+      final fakeRunner = _FakePipelineRunner(
+        outputs: {'delete-dry-run': buffer.toString()},
+      );
+
+      await tester.pumpWidget(MediaPipelineApp(runner: fakeRunner));
+
+      await tester.tap(find.text('Review Duplicate Move Plan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Run Step'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Move Duplicates To Trash'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Review Duplicate Thumbnails'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+
+      // Only 20 of 250 reviewed (8%) — the coverage banner is accurate,
+      // and the extra small-fraction warning is now shown alongside it.
+      expect(
+        find.text('You reviewed 20 of 250 pairs (8%) before confirming.'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('This is a large duplicate set (250 pairs)'),
+        findsOneWidget,
+      );
+
+      // Reopening the dialog alone draws a fresh, non-overlapping batch of
+      // 20 (see _DuplicateThumbnailReviewDialogState.initState), taking
+      // cumulative coverage to 40 of 250 — past the #70 small-fraction
+      // threshold (>10%).
+      await tester.tap(find.text('Review Duplicate Thumbnails Again'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+
+      // 40 of 250 is 16% — above the small-fraction threshold, so the
+      // extra warning no longer shows even though the set is still large.
+      expect(
+        find.text('You reviewed 40 of 250 pairs (16%) before confirming.'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('This is a large duplicate set'),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
     'issue #54: a stderr line landing physically BETWEEN a real "Keep:" and '
     'its matching "Would trash:" in the merged log must never overwrite the '
     'pending keep and mispair the real trash target — the review dialog '
