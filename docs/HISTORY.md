@@ -1993,3 +1993,52 @@ skipped.
 data-loss risk (the media file itself was always kept regardless of this bug; only its title/
 description tag was silently dropped for the narrow title-only/description-only sidecar case).
 Closes #91.
+
+## Phase 30 — Dedup coverage banner: warn when a large set's precise percentage is still a small fraction (issue #70)
+
+**Context:** Follow-up from Astrid's non-blocking review note on PR #69 (#53). #53 replaced the old
+vague "Showing N of M pairs" text with a precise, prominent coverage banner ("You reviewed N of M
+pairs (X%)"). For real-world runs with 5,000+ pairs in one duplicate set, reviewing even a few
+~20-pair "Review Another Sample" batches only moves the percentage a fraction of a point — a human
+watching the number tick up slightly could come away feeling *more* confident than the old vague-count
+design, despite having reviewed almost nothing relative to the set. This is the opposite failure mode
+from #53's original problem (false confidence from an under-communicated small sample); now it's false
+confidence from apparent precision on a huge set.
+
+**Fix (the cheap half of the issue's option 1 — absolute-count-plus-percentage framing for large
+sets):** Added `duplicateReviewIsSmallFractionOfLargeSet(reviewedCount, totalPairs)` to
+`lib/src/duplicate_report.dart`, gated by two new constants: `duplicateReviewLargeSetThreshold` (200
+pairs) and `duplicateReviewSmallFractionPercent` (10%). When a duplicate set is at or above the large
+threshold *and* cumulative coverage is at or below the small-fraction threshold, `_DedupReviewPanel` in
+`lib/src/media_pipeline_app.dart` now shows an extra warning line below the existing coverage chip:
+"This is a large duplicate set (N pairs) — M reviewed is still a small fraction even at X%. Consider
+reviewing several more samples, or spot-checking specific folders, before trusting the full move
+plan." The warning clears automatically once cumulative coverage climbs past 10% of a large set, or
+if the set never reached 200 pairs in the first place (a set that small was never the problem #70
+describes).
+
+**Deliberately did not build option 2** (folder-scoped review UI) — the issue itself flagged this as
+disproportionate to its own "low risk, UX/framing only" assessment unless trivially cheap, and no
+existing folder-scoping infrastructure exists to hook into. **Did not touch the confirm gate** —
+`canRunStep()` and the `duplicateThumbnailReviewAcknowledged` mechanics are untouched; this is
+framing-only, same constraint #53 held itself to.
+
+**Tests added:**
+- `test/duplicate_report_test.dart`: new `duplicateReviewIsSmallFractionOfLargeSet` group — false for
+  small sets even at low percentage coverage, true for a large set with low absolute coverage (mirrors
+  the issue's 5,412-pair example), false once coverage climbs past 10%, false once a large set is fully
+  reviewed, and boundary cases at exactly the large-set threshold.
+- `test/dedup_review_widget_test.dart`: new end-to-end case with a 250-pair set — after one 20-pair
+  batch (8%) the extra warning shows; after reopening the review dialog once more (drawing a fresh
+  20-pair batch automatically, reaching 40 of 250 = 16%) the warning clears while the underlying
+  coverage banner and gate behavior are unaffected.
+
+**Verification:** `flutter analyze`: no issues. `flutter test`: full suite green, 393 -> 399 tests (net
++6: 5 new in `test/duplicate_report_test.dart`, 1 new in `test/dedup_review_widget_test.dart`), 1
+skipped (Windows-only, expected on Linux). `test/pipeline_runner_test.dart`'s
+`stdout/stderr separation ... onLog still receives every stdout and stderr chunk` test failed
+intermittently in this environment both with and without this branch's changes (confirmed via
+`git stash`) — pre-existing flakiness, unrelated to this change.
+
+**Risk:** Low, matching #70's own assessment — UX/framing only, no data-loss path, confirm-gate
+mechanics unaffected. Closes #70.

@@ -237,6 +237,46 @@ Would trash: relative/not/absolute.jpg
     });
   });
 
+  group('duplicateReviewIsSmallFractionOfLargeSet (#70)', () {
+    test('false for small sets even at low coverage', () {
+      // 5 of 100 is 5% but 100 pairs isn't "large" — the old vague-count
+      // framing was fine at this scale, no extra warning needed.
+      expect(duplicateReviewIsSmallFractionOfLargeSet(5, 100), isFalse);
+    });
+
+    test('true for a large set with low absolute coverage', () {
+      // Mirrors the real-world 5,000+ pair runs from the issue: a couple of
+      // 20-pair sample batches barely move the percentage.
+      expect(duplicateReviewIsSmallFractionOfLargeSet(20, 5412), isTrue);
+      expect(duplicateReviewIsSmallFractionOfLargeSet(40, 5412), isTrue);
+    });
+
+    test('false once coverage of a large set climbs past the threshold', () {
+      expect(duplicateReviewIsSmallFractionOfLargeSet(600, 5412), isFalse);
+    });
+
+    test('false once a large set is fully reviewed', () {
+      expect(duplicateReviewIsSmallFractionOfLargeSet(5412, 5412), isFalse);
+    });
+
+    test('boundary: exactly at the large-set threshold', () {
+      expect(
+        duplicateReviewIsSmallFractionOfLargeSet(
+          20,
+          duplicateReviewLargeSetThreshold,
+        ),
+        isTrue,
+      );
+      expect(
+        duplicateReviewIsSmallFractionOfLargeSet(
+          19,
+          duplicateReviewLargeSetThreshold - 1,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('sampleAdditionalDuplicateReviewPairs', () {
     List<DuplicateReviewPair> makePairs(int n) => [
       for (var i = 0; i < n; i++)
