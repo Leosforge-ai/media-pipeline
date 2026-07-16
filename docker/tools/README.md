@@ -5,12 +5,14 @@ Part of the cross-platform roadmap in [#76](https://github.com/Leosforge-ai/medi
 needs — `exiftool`, `ffmpeg`/`ffprobe`, `rclone`, `czkawka_cli` — at pinned, verified versions,
 multi-arch (`linux/amd64` + `linux/arm64`, the latter for Apple Silicon Macs).
 
-**This image is wired into the desktop app.** The `dartAction`-backed pipeline steps
-(duplicate scan, metadata stitch, duplicate-trash confirm, restore-from-trash confirm,
-Immich Takeout duplicate dry-run) run through it via `lib/src/tools_container.dart`, one
-container session per step. The original `scripts/*.sh`/`.py` files still call the native
-host binaries directly and remain the documented fallback path — see issue #76's Phase 7
-for when they retire.
+**This image is wired into the desktop app.** The pipeline steps that need one of these
+tools — duplicate scan, metadata stitch, Immich Takeout duplicate dry-run — run it through
+this image via `lib/src/tools_container.dart`, one container session per step. The
+duplicate-trash and restore-from-trash confirm steps are Dart-native but don't route through
+this image at all: they're plain in-process file moves with no external tool dependency. The
+original `scripts/*.sh`/`.py` files still call the native host binaries directly and remain
+the documented fallback path for every migrated step — see issue #76's Phase 7 for when they
+retire.
 
 ## What's in it
 

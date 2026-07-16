@@ -27,7 +27,7 @@ Built from real-world failure cases: `.tgz` Takeout archives, broken MP4 files, 
 
 ## Two ways to run it
 
-**Desktop app (recommended).** A Flutter app (Linux, macOS, Windows) that wraps the pipeline, keeps every safety gate (dry-run first, explicit confirm, no silent deletion), and runs the duplicate-scan, metadata-stitch, and both confirm steps through a single pinned Docker image — no native `exiftool`/`ffmpeg`/`czkawka` install required for those steps. See [`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md).
+**Desktop app (recommended).** A Flutter app (Linux, macOS, Windows) that wraps the pipeline, keeps every safety gate (dry-run first, explicit confirm, no silent deletion), and runs the duplicate-scan and metadata-stitch steps through a single pinned Docker image — no native `exiftool`/`czkawka` install required for those. Both trash-confirm steps (delete, restore) are plain in-process file moves needing neither Docker nor any native tool. See [`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md).
 
 **Raw scripts.** The original `scripts/00`–`13` Bash/Python pipeline, run by hand. Requires the native tools listed under [Requirements](#requirements). Still fully maintained as a fallback and for scripted/headless use. See [`INSTRUCTIONS.md`](INSTRUCTIONS.md) for the full walkthrough.
 
@@ -85,7 +85,7 @@ flutter pub get
 flutter run -d linux   # or -d macos / -d windows
 ```
 
-Build the tools image once (see [`docker/tools/README.md`](docker/tools/README.md)) before running steps that need it (duplicate scan, metadata stitch, both trash-confirm steps):
+Build the tools image once (see [`docker/tools/README.md`](docker/tools/README.md)) before running the duplicate-scan, metadata-stitch, or Immich Takeout duplicate-dry-run steps — see [`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md#execution-model) for the full list:
 
 ```bash
 docker build -t media-pipeline-tools:local docker/tools
@@ -177,7 +177,7 @@ Duplicate removal moves files to `/mnt/target_drive/media_trash`. To restore:
 
 ## Requirements
 
-**Desktop app path:** Docker (for the pinned tools image) plus platform-native Flutter build tooling. No native `exiftool`/`ffmpeg`/`czkawka`/`rclone` install needed for the steps that route through the container.
+**Desktop app path:** Docker (for the pinned tools image) plus platform-native Flutter build tooling. No native `exiftool`/`czkawka` install needed for the steps that route through the container — see [`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md#execution-model) for exactly which steps that is; some steps still need native `rsync`, and steps not yet migrated still need the full native tool list below.
 
 **Raw scripts path:** Ubuntu/Debian-like Linux. `scripts/01_setup_dependencies.sh` installs:
 

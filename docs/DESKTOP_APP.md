@@ -6,22 +6,27 @@ and duplicate cleanup still moves files into `media_trash`, never deletes.
 
 ## Execution model
 
-Every pipeline step is either:
+Every pipeline step is either Dart-native (`dartAction`) or a native subprocess (`command`
+that shells out to the original `scripts/*.sh`/`.py` file). Dart-native steps split further
+by whether they need an external tool:
 
-- **Container-routed (`dartAction`)** — the step's logic is native Dart, and any external
-  tool it needs (`exiftool`, `ffmpeg`, `rclone`, `czkawka_cli`) runs inside the pinned
-  `media-pipeline-tools` Docker image (see [`docker/tools/README.md`](../docker/tools/README.md)),
-  one container session per step. This covers the duplicate scan, metadata stitch, both
-  trash-confirm steps (duplicate delete, restore-from-trash), and the Immich Takeout
-  duplicate dry-run. No native tool install is required for these on any platform.
-- **Native subprocess (`command`)** — the step still shells out to the original
-  `scripts/*.sh`/`.py` file on the host (system check, dependency install, rclone config,
-  Immich setup/verify, sync-to-library, cleanup verify). These are Linux-only or genuinely
-  need host-level access (`sudo`, interactive prompts, real device visibility) that a
-  container can't provide.
+- **Container-routed** — needs an external tool (`exiftool`, `rsync`, `czkawka_cli`), which
+  runs inside the pinned `media-pipeline-tools` Docker image (see
+  [`docker/tools/README.md`](../docker/tools/README.md)), one container session per step.
+  This is **metadata stitch** and **duplicate scan** (both need `docker`), and the
+  **Immich Takeout duplicate dry-run** (needs `docker` + `sha256sum`, also containerized).
+  Metadata stitch additionally shells out to `rsync` on the host directly for the
+  Google-Drive-merge portion of that step — not fully containerized.
+- **Pure Dart, no external tool at all** — **both trash-confirm steps** (duplicate delete,
+  restore-from-trash) and their paired dry-runs are plain in-process file moves; they need
+  neither Docker nor any native binary.
+- **Native subprocess (`command`)** — system check, dependency install, rclone config, Immich
+  setup/verify, sync-to-library, cleanup verify still shell out to the original script on the
+  host. These are Linux-only or genuinely need host-level access (`sudo`, interactive
+  prompts, real device visibility) a container can't provide.
 
-Only Docker is required to build and run the container-routed steps — see the desktop app's
-own `requiredTools` checks per step in the UI.
+Check each step's `requiredTools` in `lib/src/pipeline_models.dart` for the exact, current
+dependency list — this summary can drift as steps are migrated.
 
 ## Platform Support
 
@@ -186,7 +191,7 @@ The app keeps the phone backup checklist in a local JSON file only. It does not 
 ## Safety Notes
 
 - The app never adds `--confirm` to dry-run commands, and never constructs a confirm action implicitly.
-- Confirm steps are separate step definitions and are locked until their paired dry-run succeeds — this gate is enforced identically regardless of whether a step runs as a container-routed `dartAction` or a native `command`.
-- For container-routed steps (see [Execution model](#execution-model) above), the Dart code is the actual, live implementation of media movement, metadata writes, and duplicate cleanup — not a wrapper around the Bash/Python scripts. The original scripts remain a fully maintained fallback for those specific steps, and the sole implementation for everything not yet container-routed (Immich setup, sync, verification, rclone config).
+- Confirm steps are separate step definitions and are locked until their paired dry-run succeeds — this gate is enforced identically regardless of whether a step runs as a `dartAction` (container-routed or pure Dart) or a native `command`.
+- For `dartAction` steps (see [Execution model](#execution-model) above), the Dart code is the actual, live implementation of media movement, metadata writes, and duplicate cleanup — not a wrapper around the Bash/Python scripts. The original scripts remain a fully maintained fallback for those specific steps, and the sole implementation for everything still `command`-backed (Immich setup, sync, verification, rclone config).
 - Keep using a disposable test media folder when validating code changes.
 - The Immich connection panel performs read-only HTTP GET checks only.
