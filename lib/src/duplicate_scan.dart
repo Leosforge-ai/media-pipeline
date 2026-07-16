@@ -75,8 +75,8 @@
 /// or failure) that the Bash script never created — flagged here
 /// explicitly, not silently.
 ///
-/// ## Real discovery during parity verification: `czkawka_cli` needs a
-/// writable `$HOME`
+/// ## `czkawka_cli` needs a writable `$HOME` — now fixed at the
+/// `ToolsContainer` level (issue #105)
 ///
 /// Manually exercising the real `czkawka_cli` binary from the
 /// `media-pipeline-tools` image (the same one [ToolsContainer] runs)
@@ -87,18 +87,17 @@
 /// container, so the shell's default `$HOME` is `/`, which that uid cannot
 /// write to), `czkawka_cli` panics writing its cache database and exits
 /// `101` — the exact "genuine crash" code this module's own exit-code
-/// classification is designed to catch and abort on. Every scan invocation
-/// in [runSingleCzkawkaScan] therefore explicitly passes `env HOME=...`
-/// (the container-side temp dir) ahead of `czkawka_cli` — reusing the
-/// same writable, mount-internal temp directory the report-staging design
-/// decision above already needs, so no extra directory/mount is required to
-/// fix this. Verified empirically against the real image: the same `dup`
-/// scan against real duplicate files panics (exit 101, no report written)
-/// with `$HOME` unset under a `--user` override, and succeeds normally
-/// (exit 11, real report written) once `$HOME` points at a writable
-/// directory. None of the other four `ToolsContainer` consumers
-/// (`exiftool`/`ffmpeg`/`ffprobe`/`rclone`/`sha256sum`) needed this — they
-/// don't maintain a persistent cache database the way `czkawka_cli` does.
+/// classification is designed to catch and abort on. This was originally
+/// fixed here with a per-invocation `env HOME=...` ahead of every
+/// `czkawka_cli` call; per issue #105, that fix now lives in
+/// [ToolsContainer.start] itself (`-e HOME=/tmp` on `docker run`, applied
+/// whenever the `--user` override is active), so this module no longer
+/// needs to know about it at all — every `docker exec` into the container
+/// already has a writable `$HOME`. Verified empirically against the real
+/// image (`test/duplicate_scan_test.dart`'s Docker-gated parity test): the
+/// same `dup` scan against real duplicate files, run with no per-call
+/// `HOME` override, succeeds normally (exit 11, real report written) now
+/// that the container itself sets `$HOME`.
 ///
 /// ## Design decision: blur-scan (ImageMagick `convert`) is NOT ported —
 /// see issue #103's task brief, option (b)
@@ -277,11 +276,10 @@ class CleaningStagingNotFoundException implements Exception {
 /// Runs one `czkawka_cli` scan inside [container] and classifies its exit
 /// code, exactly mirroring `run_czkawka_scan()`'s core logic (the
 /// `tee`/`PIPESTATUS` plumbing itself is not needed here — see this file's
-/// top-level doc comment). [homeContainerPath] is passed as `$HOME` for the
-/// invocation — see the "czkawka_cli needs a writable $HOME" design
-/// decision above; callers should pass a writable, container-mount-internal
-/// directory (real callers: the same temp directory the report itself is
-/// staged into).
+/// top-level doc comment). No per-call `$HOME` override is needed —
+/// [ToolsContainer.start] itself gives the container a writable `$HOME`
+/// (issue #105; see this file's top-level "czkawka_cli needs a writable
+/// $HOME" doc section).
 ///
 /// Emits progress via [onLog] before running (`"==> Running Czkawka
 /// $description"`) and a result line after (no-duplicates vs
@@ -294,14 +292,11 @@ Future<ProcessResult> runSingleCzkawkaScan({
   required CzkawkaScanKind kind,
   required String stagingContainerPath,
   required String reportContainerPath,
-  required String homeContainerPath,
   void Function(String line)? onLog,
 }) async {
   onLog?.call('==> Running Czkawka ${kind.description}');
 
   final result = await container.exec([
-    'env',
-    'HOME=$homeContainerPath',
     'czkawka_cli',
     kind.subcommand,
     '-d',
@@ -444,7 +439,6 @@ class DuplicateScanRunner {
           kind: kind,
           stagingContainerPath: stagingContainerPath,
           reportContainerPath: reportContainerPath,
-          homeContainerPath: tempContainerPath,
           onLog: onLog,
         );
 

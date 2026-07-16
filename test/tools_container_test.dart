@@ -324,6 +324,51 @@ void main() {
     );
 
     test(
+      'start() passes -e HOME=/tmp when hostUserFlag is set (#105 — an '
+      'arbitrary host uid has no /etc/passwd entry and thus no resolvable '
+      '\$HOME; /tmp is world-writable by any uid by default)',
+      () async {
+        List<String>? capturedArgs;
+        final container = ToolsContainer(
+          hostMountRoot: '/mnt/target_drive',
+          hostUserFlag: '1234:5678',
+          runner: (args) async {
+            capturedArgs = args;
+            return ProcessResult(0, 0, 'abc123containerid\n', '');
+          },
+        );
+
+        await container.start();
+
+        final envIndex = capturedArgs!.indexOf('-e');
+        expect(envIndex, greaterThanOrEqualTo(0));
+        expect(capturedArgs![envIndex + 1], 'HOME=/tmp');
+      },
+    );
+
+    test(
+      'start() omits -e HOME=/tmp entirely when hostUserFlag is null — the '
+      'baked-in "tools" image user already has a real, writable \$HOME '
+      '(/home/tools), so there is nothing to fix',
+      () async {
+        List<String>? capturedArgs;
+        final container = ToolsContainer(
+          hostMountRoot: '/mnt/target_drive',
+          hostUserFlag: null,
+          runner: (args) async {
+            capturedArgs = args;
+            return ProcessResult(0, 0, 'abc123containerid\n', '');
+          },
+        );
+
+        await container.start();
+
+        expect(capturedArgs, isNot(contains('-e')));
+        expect(capturedArgs, isNot(contains('HOME=/tmp')));
+      },
+    );
+
+    test(
       'defaults hostUserFlag to detectHostUserFlag() when not overridden',
       () {
         final container = ToolsContainer(hostMountRoot: '/mnt/target_drive');
@@ -801,6 +846,43 @@ void main() {
             ]);
             expect(result.exitCode, 0, reason: result.stderr as String);
             expect(result.stdout, 'pre-existing host bytes');
+          } finally {
+            await container.stop();
+          }
+        },
+        skip: _imageReady
+            ? false
+            : 'Docker or the media-pipeline-tools:local image is not '
+                  'available in this environment.',
+      );
+
+      test(
+        'a file czkawka_cli\'s cache DB would need to write under \$HOME is '
+        'actually writable as the arbitrary host uid override (#105 — '
+        'proves the container-level `-e HOME=/tmp` fix, not just that the '
+        'flag was passed)',
+        () async {
+          final container = ToolsContainer(hostMountRoot: tempDir.path);
+          await container.start();
+          try {
+            final homeResult = await container.exec(['bash', '-c', 'echo -n "\$HOME"']);
+            expect(homeResult.exitCode, 0, reason: homeResult.stderr as String);
+            expect(homeResult.stdout, '/tmp');
+
+            final writeResult = await container.exec([
+              'bash',
+              '-c',
+              r'echo written-to-home > "$HOME/home_write_test.txt"',
+            ]);
+            expect(
+              writeResult.exitCode,
+              0,
+              reason:
+                  'writing under \$HOME failed as the arbitrary host uid '
+                  'override: ${writeResult.stderr} — this is exactly the '
+                  'failure mode that made czkawka_cli panic (exit 101) '
+                  'before #105.',
+            );
           } finally {
             await container.stop();
           }

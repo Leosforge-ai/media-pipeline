@@ -214,7 +214,6 @@ void main() {
               kind: CzkawkaScanKind.dup,
               stagingContainerPath: '/data/cleaning_staging',
               reportContainerPath: '/data/.duplicate_scan_tmp/dup.txt',
-              homeContainerPath: '/data/.duplicate_scan_tmp',
               onLog: logLines.add,
             ),
             throwsA(
@@ -231,8 +230,8 @@ void main() {
       );
 
       test(
-        'passes env HOME=<homeContainerPath> ahead of czkawka_cli — the '
-        'discovered fix for the arbitrary-host-uid cache-write panic',
+        'invokes czkawka_cli directly with no per-call env HOME override — '
+        'the \$HOME fix now lives in ToolsContainer.start() itself (#105)',
         () async {
           List<String>? capturedExecArgs;
           final container = ToolsContainer(
@@ -256,15 +255,13 @@ void main() {
             kind: CzkawkaScanKind.image,
             stagingContainerPath: '/data/cleaning_staging',
             reportContainerPath: '/data/.duplicate_scan_tmp/images.txt',
-            homeContainerPath: '/data/.duplicate_scan_tmp',
           );
 
           expect(capturedExecArgs, isNotNull);
+          expect(capturedExecArgs, isNot(contains('env')));
           expect(
             capturedExecArgs,
             containsAllInOrder([
-              'env',
-              'HOME=/data/.duplicate_scan_tmp',
               'czkawka_cli',
               'image',
               '-d',

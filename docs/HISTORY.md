@@ -2131,3 +2131,38 @@ Full suite after restoring the fix: `python3 -m unittest discover -s tests` — 
 (51 -> 53, net +2). `shellcheck -x -e SC1091 scripts/*.sh config/*.sh` — clean. `shfmt -d
 scripts/*.sh config/*.sh` — clean (no diff). `python3 -m compileall scripts config tests` —
 clean. Closes #102.
+
+## Phase 33 — ToolsContainer: writable `$HOME` for the arbitrary host UID, moved out of
+duplicate_scan.dart (2026-07-16)
+
+**Context:** #105, a preventive follow-up flagged in PR #104's own review. PR #104 discovered
+that `czkawka_cli` panics (exit 101) under `ToolsContainer`'s `--user <host-uid>:<host-gid>`
+override (#76 Phase 3): the arbitrary host uid has no `/etc/passwd` entry inside the container,
+so it has no resolvable `$HOME` to write its scan cache database to. That PR fixed it with a
+per-consumer workaround — `env HOME=<container temp dir>` passed explicitly ahead of every
+`czkawka_cli` invocation in `lib/src/duplicate_scan.dart`. Per Astrid's review, that fix was a
+genuine one-off at the time (no other `ToolsContainer` consumer needs a writable `$HOME`), but
+undocumented at the wrong layer: any future consumer that does would hit the exact same failure
+and have to rediscover it from scratch.
+**Decision:** Moved the fix into `ToolsContainer.start()` itself, alongside the existing
+`--user` override it already applies: whenever `hostUserFlag` is non-null, `start()` now also
+passes `-e HOME=/tmp` to `docker run`. `/tmp` was chosen over a bind-mount-internal temp
+directory (`duplicate_scan.dart`'s original approach) because it's simpler and fully generic:
+`docker/tools/Dockerfile` (`debian:bookworm-slim`-based) never touches `/tmp`'s permissions, so
+it keeps Debian's default world-writable mode (`1777`, sticky bit) — writable by any uid,
+including one with no `/etc/passwd` entry, with no extra directory/mount plumbing needed. Left
+unset when `hostUserFlag` is `null` (Windows, or UID/GID detection failed): the image's baked-in
+`tools` user already has a real, writable `$HOME` (`/home/tools`, from `useradd --create-home`),
+so there's nothing to fix in that case. `duplicate_scan.dart`'s per-call `env HOME=...` was then
+removed entirely — `runSingleCzkawkaScan` now execs `czkawka_cli` directly, with no `homeContainerPath`
+parameter to thread through.
+**Outcome:** `test/tools_container_test.dart` gained three new tests: two fake-runner tests
+proving `start()` passes `-e HOME=/tmp` when `hostUserFlag` is set and omits it when `null`, and
+one real-Docker test in the existing "host UID/GID mapping" group proving `$HOME` actually
+resolves to `/tmp` and is genuinely writable under the arbitrary-uid override — the same failure
+mode that made `czkawka_cli` panic before this fix. `test/duplicate_scan_test.dart`'s existing
+Docker-gated Bash-vs-Dart parity test (real `ToolsContainer`, real `czkawka_cli`, a real
+byte-identical duplicate pair) still passes with the per-call `env HOME=...` fully removed —
+proof the container-level fix covers the case, not just code inspection. `flutter analyze`:
+clean. `flutter test`: full suite green against real Docker, 397 -> 400 tests (net +3). Closes
+#105.
