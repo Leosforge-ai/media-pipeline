@@ -1938,3 +1938,58 @@ fallback (issue #76's Phase 7) and as the only way to run the optional blur scan
 (tracking issue — see roadmap, stays open) and part of #103 (status check-in issue — gaps 2-5 remain
 open), not closing either. Flagging **Cody + Astrid** review — this is a real, previously-uncovered
 production execution path for a tool that scans real personal media.
+
+## Phase 29 — Fix `apply_metadata_with_exiftool`'s off-by-one skip guard, both languages (issue #91)
+
+**Context:** Found during PR #89's review (Cody + Astrid) and filed as issue #91.
+`apply_metadata_with_exiftool`'s "no useful tags queued, skip exiftool" guard had an off-by-one:
+Python's `args` starts as `["exiftool", "-overwrite_original"]` (length 2), gaining +1 for a title,
++1 for a description, or +3 for date/GPS, per queued tag. The guard read `if len(args) == 3`, which
+only fires when *exactly one* single-flag tag (title-only or description-only, nothing else) was
+queued — silently discarding a real tag. The genuine "zero tags queued" case is `len(args) == 2`,
+which fell through the guard and ran a harmless but mislabeled no-op
+`exiftool -overwrite_original <file>` call instead.
+
+**Fix:** `scripts/04_stitch_metadata.py`'s guard changed from `len(args) == 3` to `len(args) == 2`.
+`lib/src/stitch_metadata.dart`'s `applyMetadataWithExiftool` — the Dart port from PR #89, which
+deliberately preserved the Python bug byte-for-byte for cross-language parity at the time — had its
+own equivalent guard (`args.length == 2`, one less than Python's since the Dart `args` list omits the
+executable name) changed to `args.length == 1`, matching the corrected Python behavior. Per #91's
+scope note in the Dart module's own top-level doc comment (the "Design decision" section explicitly
+flagged this as a follow-up for Cody/Astrid to weigh in on), this PR closes that follow-up rather than
+leaving the two implementations to silently diverge — Python correct, Dart still buggy, with the
+Dart parity tests wrongly read as proof-of-correctness for the old behavior.
+
+**Why the Dart side matters for real pipeline runs, not just parity docs:** per #76 Phase 2 (PR
+#100), `stitch-metadata` is `dartAction`-backed in production — `lib/src/stitch_metadata.dart` is
+what actually runs when a user executes this step in the app today, not
+`scripts/04_stitch_metadata.py`. The Dart-side fix, not the Python one, is what fixes real pipeline
+runs.
+
+**Tests updated:**
+- `tests/test_stitch_metadata.py`: three new regression tests —
+  `test_apply_metadata_writes_title_only_tag_instead_of_skipping`,
+  `test_apply_metadata_writes_description_only_tag_instead_of_skipping` (both mock `subprocess.run`
+  and assert it's called with the real `-Title=`/`-Description=` flag, proving the tag is no longer
+  discarded), and `test_apply_metadata_skips_exiftool_when_truly_zero_tags_queued` (asserts
+  `subprocess.run` is never called for a genuinely empty sidecar).
+- `test/stitch_metadata_test.dart`: the two `applyMetadataWithExiftool` tests that asserted the old
+  buggy behavior were updated to assert the corrected behavior — the former "no usable tags, but
+  exiftool still ran as a no-op" test now asserts exiftool is *not* invoked for zero tags, and the
+  former "title-only quirk, exiftool never invoked" test now asserts exiftool *is* invoked with
+  `-Title=...`. A new sibling test covers the description-only case. The module's top-level doc
+  comment and the function's own doc comment were both updated to describe the fix instead of the
+  preserved quirk.
+
+**Verification:** Python — `python3 -m unittest discover -s tests`: 51 tests (48 -> 51, +3), all
+green; `ruff check scripts config tests`: clean; `python3 -m compileall scripts config tests`: clean.
+Dart — `flutter analyze`: no issues; `flutter test`: full suite green, 388 -> 389 tests (net +1, since
+one existing test was split into two plus a new description-only sibling), all Docker-gated groups
+(including the real end-to-end `MetadataStitcher.run` + `stitch-metadata` `PipelineRunner` wiring
+tests) actually ran against a real Docker daemon and the `media-pipeline-tools:local` image, not
+skipped.
+
+**Risk:** Low-medium, matching #91's own risk assessment — a metadata-completeness fix, not a
+data-loss risk (the media file itself was always kept regardless of this bug; only its title/
+description tag was silently dropped for the narrow title-only/description-only sidecar case).
+Closes #91.
