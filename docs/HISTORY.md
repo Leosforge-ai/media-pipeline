@@ -2082,3 +2082,52 @@ simulated app restart restores a persisted checkpoint and disappears once the us
 next segment; one test proves it appears after a mid-segment step failure (before retrying) and
 disappears once the retry succeeds and the segment completes. `flutter analyze`: clean.
 `flutter test`: full suite green, 389 -> 391 tests (net +2). Closes #68.
+
+## Phase 32 — Fix `11_restore_from_trash.sh`'s collision handling so one skip doesn't abort the batch (issue #102)
+
+**Context:** `scripts/11_restore_from_trash.sh --confirm` runs its per-file restore loop under
+`set -euo pipefail` and moves each file with `mv -n` (no-clobber, matching the script's intended
+"skip on collision" behavior). On modern coreutils (9.4+), `mv -n` exits 1 — not 0 — when it
+skips an existing destination. Combined with `set -e`, the *first* collision in a batch killed
+the whole script immediately: every file after it was silently never restored, with a non-zero
+exit that could be mistaken for total failure rather than partial-then-stopped. Same class of
+bug as issue #81's `05_cleanup_scan.sh` fix (Phase — see PR #83): trusting a command's raw exit
+status under `set -e`/`pipefail` instead of explicitly classifying which codes are expected vs.
+fatal. Discovered building PR #101's Dart/Bash mirror-parity test; the Dart `TrashRestorer.run()`
+port (live in production per #76 Phase 2) does not have this bug — its loop has no throw-on-skip
+and correctly continues past a collision. Per #76 Phase 7 this Bash script is now only the
+documented fallback path, but a fallback that silently aborts mid-batch is a materially worse
+safety property than advertised, so it was still worth fixing rather than leaving as a known
+trap.
+
+**Fix:** `mv -n`'s non-zero exit can mean either a benign no-clobber skip or a genuine failure
+(permission denied, disk full, source vanished) — the exit code alone doesn't reliably
+distinguish them. Rather than trust exit-code semantics (issue #81's `${PIPESTATUS[0]}` pattern
+doesn't directly transfer here since this `mv` isn't inside a pipe), the fix checks the actual
+filesystem signal: on a non-zero `mv -n`, `[[ -e "$dest" ]]` tells us which case happened. If the
+destination exists, it was a no-clobber skip — log it and continue restoring the rest of the
+batch. If it doesn't exist, `mv` failed for a real reason — exit with that status and abort,
+matching issue #81's fail-closed philosophy and this repo's data-loss-prevention priority (a
+restore script that fails open and mistakes a real failure for "just a skip" would be worse than
+the current behavior).
+
+**Tests added:** `tests/test_shell_scripts.py::RestoreFromTrashCollisionTests`:
+- `test_mid_batch_collision_does_not_abort_restoring_the_rest_of_the_batch` — three trashed
+  files where the middle one collides with a pre-existing file at its destination; asserts the
+  files before *and after* the collision are both restored, the collision is skipped (not
+  overwritten) and its trashed copy is left in place, not silently lost.
+- `test_genuine_mv_failure_still_aborts_and_reports_an_error` — makes the destination directory
+  unwritable (permission denied, not a collision) and asserts the script still aborts with a
+  non-zero exit and a clear `ERROR: failed to restore` message.
+
+**Fail-before/pass-after proof:** temporarily reverted `scripts/11_restore_from_trash.sh` via
+`git stash push -- scripts/11_restore_from_trash.sh` and re-ran just the new tests — both failed
+exactly as expected (the collision test hit `mv: not replacing ...` with a non-zero exit; the
+genuine-failure test's `mv: cannot move ... Permission denied` message didn't match the new
+`ERROR: failed to restore` string, since the old script had no distinct error path). Restored the
+fix (`git stash pop`) and re-ran — both pass.
+
+Full suite after restoring the fix: `python3 -m unittest discover -s tests` — 53 tests, all pass
+(51 -> 53, net +2). `shellcheck -x -e SC1091 scripts/*.sh config/*.sh` — clean. `shfmt -d
+scripts/*.sh config/*.sh` — clean (no diff). `python3 -m compileall scripts config tests` —
+clean. Closes #102.
