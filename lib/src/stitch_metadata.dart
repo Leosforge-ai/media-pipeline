@@ -63,25 +63,26 @@ import 'tools_container.dart';
 /// in this series relies on, instead of re-implementing `shutil.move`
 /// semantics from scratch.
 ///
-/// ## Design decision: `apply_metadata_with_exiftool`'s `len(args) == 3`
-/// check is preserved exactly, including its apparent off-by-one quirk
+/// ## Design decision (historical, fixed by issue #91): `apply_metadata_with_exiftool`'s
+/// `len(args) == 3` check
 ///
 /// The real Python function builds `args = ["exiftool", "-overwrite_original"]`
 /// (length 2) and only appends `-Title=...`/`-Description=...`/date/GPS
 /// flags when the corresponding metadata is present, then returns `False`
-/// (skip exiftool entirely) `if len(args) == 3`. Read literally, this
-/// means: if *exactly one* single-flag tag was added (e.g. only `title` is
-/// present in the JSON sidecar, with no `photoTakenTime`/`creationTime`,
-/// no `description`, and no `geoData`), the function treats that as "no
-/// useful tags" and skips exiftool — even though a real, useful `-Title=`
-/// flag was queued. This looks like an off-by-one bug (the "no tags at
-/// all" case is actually `len(args) == 2`), but this port's brief is to
-/// match the *exact* existing behavior for parity, not to silently fix
-/// production logic during a port. [applyMetadataWithExiftool] preserves
-/// this exact check (see its own doc comment). Flagged explicitly in this
-/// PR's body for Cody/Astrid to weigh in on whether a follow-up fix issue
-/// against the Python script is warranted — out of scope for this
-/// port-for-parity PR either way.
+/// (skip exiftool entirely) once no useful tags were queued. The original
+/// PR that introduced this port (#89) deliberately preserved the Python
+/// script's `if len(args) == 3` check byte-for-byte, including its
+/// off-by-one bug: read literally, `len(args) == 3` fires when *exactly
+/// one* single-flag tag was added (e.g. only `title` is present in the
+/// JSON sidecar, with no date and no GPS), silently discarding that real
+/// tag — while the genuine "zero tags queued" case (`len(args) == 2`)
+/// fell through and invoked a no-op `exiftool -overwrite_original <file>`
+/// call. Issue #91 fixed this in the Python original (`len(args) == 2`
+/// is now the skip condition), and this port was updated in the same fix
+/// to match — see [applyMetadataWithExiftool]'s own doc comment for the
+/// corrected check. Cross-language parity is restored: both sides now
+/// skip exiftool only when zero tags were queued, and both sides write a
+/// title-only or description-only tag instead of discarding it.
 ///
 /// ## Design decision: all three external tools (`unzip`/`tar`/`exiftool`)
 /// route through [ToolsContainer] (Phase 2 of issue #76)
@@ -540,13 +541,13 @@ ExiftoolRunner containerExiftoolRunner({
 /// exiftool failure never aborts the run, it's just recorded and the media
 /// file is still moved to staging unmodified.
 ///
-/// Preserves the exact (see this file's top-level doc comment)
-/// `if len(args) == 3: return False` check from the Python original: if
-/// precisely one single-flag tag (of `-Title=`/`-Description=`) was queued
-/// and nothing else (no date, no GPS), this returns `false` and never
-/// invokes exiftool at all, even though a real tag was available. This is
-/// preserved for byte-for-byte parity with the production script, not
-/// because it's understood to be correct — see the module doc comment.
+/// Mirrors the corrected (see this file's top-level doc comment; issue #91)
+/// `if len(args) == 2: return False` check from the Python original: this
+/// returns `false` (skipping exiftool entirely) only when *zero* tags were
+/// queued at all (no date, no title, no description, no GPS). A single
+/// single-flag tag (title-only or description-only) now correctly proceeds
+/// to invoke exiftool with that real tag, matching the corrected Python
+/// script instead of the previously-preserved off-by-one quirk.
 Future<bool> applyMetadataWithExiftool(
   String mediaPath,
   String jsonPath, {
@@ -594,12 +595,12 @@ Future<bool> applyMetadataWithExiftool(
     args.add(lon >= 0 ? '-GPSLongitudeRef=E' : '-GPSLongitudeRef=W');
   }
 
-  // Mirrors `if len(args) == 3: return False` exactly. Python's `args`
-  // starts as `["exiftool", "-overwrite_original"]` (length 2); this port's
-  // `args` omits the executable name (passed separately to [runner]), so
-  // the equivalent threshold here is length 2 (Python's 3, minus 1 for the
-  // omitted executable-name element).
-  if (args.length == 2) {
+  // Mirrors `if len(args) == 2: return False` (issue #91's fix). Python's
+  // `args` starts as `["exiftool", "-overwrite_original"]` (length 2); this
+  // port's `args` omits the executable name (passed separately to
+  // [runner]), so the equivalent "zero tags queued" threshold here is
+  // length 1 (Python's 2, minus 1 for the omitted executable-name element).
+  if (args.length == 1) {
     return false;
   }
 
