@@ -774,7 +774,7 @@ not just the scoring logic.
 values and ordering; adversarial parsing tests matching the rigor of
 `tests/test_shell_scripts.py`'s Bash coverage (report headers, dimension lines, size
 annotations, and out-of-staging quoted paths are never misread as paths); `DuplicateDeleter`
-dry-run/confirm/missing-file/no-clobber behavior; a `renderDryRunKeepTrashLines` <->
+dry-run/confirm/missing-file/no-clobber behavior; a `renderDryRunKeepTrashLines` `<->`
 `parseDuplicateDryRunOutput` round-trip test proving format compatibility. Highest-value test:
 a **Bash-vs-Dart parity test** that runs the real `scripts/06_delete_duplicates.sh` (via
 `Process.run`) against a synthetic Czkawka report fixture (containing a header line, a
